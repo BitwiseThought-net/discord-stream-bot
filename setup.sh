@@ -1,74 +1,127 @@
-#!/usr/bin/env bash
+#!/bin/bash
 
 # Exit immediately if a command exits with a non-zero status
 set -e
 
 echo "===================================================="
-echo "      Discord Stream Bot - Installer Script"
+echo "      Discord Stream Bot - Universal Installer"
 echo "===================================================="
 
 # Check if script is running as root
 if [ "$EUID" -eq 0 ]; then
-  echo "❌ Please run this script as your regular user (e.g., pi), NOT as root or using sudo directly."
-  echo "The script will automatically request sudo permissions when needed."
+  echo "❌ Please run this script as your regular user, NOT as root or using sudo directly."
+  echo "The script will automatically request sudo privileges when needed."
   exit 1
 fi
 
-# 1. Update system package lists
-echo -e "\n🔄 Updating system package repositories..."
-sudo apt-get update
+# Detect Linux Distribution and set package manager commands
+if [ -f /etc/os-release ]; then
+    . /etc/os-release
+    OS_ID=$ID
+    OS_LIKE=$ID_LIKE
+else
+    OS_ID="unknown"
+    OS_LIKE="unknown"
+fi
 
-# 2. Check and Install Docker Engine
+echo "🔍 Detecting operating system architecture..."
+case "$OS_ID" in
+    ubuntu|debian|raspbian|pop)
+        PKG_MANAGER="apt"
+        UPDATE_CMD="sudo apt-get update"
+        INSTALL_DOCKER_COMP="sudo apt-get install -y docker-compose-plugin"
+        ;;
+    fedora|rhel|centos)
+        PKG_MANAGER="dnf"
+        UPDATE_CMD="sudo dnf check-update || true"
+        INSTALL_DOCKER_COMP="sudo dnf install -y docker-compose-plugin"
+        ;;
+    arch|manjaro)
+        PKG_MANAGER="pacman"
+        UPDATE_CMD="sudo pacman -Syu --noconfirm"
+        INSTALL_DOCKER_COMP="sudo pacman -S --noconfirm docker-compose"
+        ;;
+    *)
+        # Check ID_LIKE strings fallback
+        if [[ "$OS_LIKE" == *"debian"* ]] || [[ "$OS_LIKE" == *"ubuntu"* ]]; then
+            PKG_MANAGER="apt"
+            UPDATE_CMD="sudo apt-get update"
+            INSTALL_DOCKER_COMP="sudo apt-get install -y docker-compose-plugin"
+        elif [[ "$OS_LIKE" == *"fedora"* ]]; then
+            PKG_MANAGER="dnf"
+            UPDATE_CMD="sudo dnf check-update || true"
+            INSTALL_DOCKER_COMP="sudo dnf install -y docker-compose-plugin"
+        elif [[ "$OS_LIKE" == *"arch"* ]]; then
+            PKG_MANAGER="pacman"
+            UPDATE_CMD="sudo pacman -Syu --noconfirm"
+            INSTALL_DOCKER_COMP="sudo pacman -S --noconfirm docker-compose"
+        else
+            echo "⚠️ Linux distribution '$OS_ID' not explicitly recognized."
+            echo "Skipping native package synchronization. Assuming dependencies are manually maintained."
+            PKG_MANAGER="manual"
+        fi
+        ;;
+case
+
+# Run update sequence if package manager detected
+if [ "$PKG_MANAGER" != "manual" ]; then
+    echo "🔄 Synchronizing system repositories using $PKG_MANAGER..."
+    $UPDATE_CMD
+fi
+
+# Check and Install Docker Engine
 if ! command -v docker &> /dev/null; then
-    echo "📦 Docker not found. Installing official Docker Engine..."
+    echo "📦 Docker not found. Deploying via official Docker get script..."
     curl -fsSL https://docker.com -o get-docker.sh
     sudo sh get-docker.sh
     rm get-docker.sh
-
-    # Add current user to docker group to avoid running docker commands with sudo
-    echo "👤 Adding $USER to the docker group..."
+    
+    echo "👤 Adding $USER to the system 'docker' security group..."
     sudo usermod -aG docker "$USER"
-    echo "⚠️ Group changes require a system relog. We will use sudo for the remainder of this setup."
+    echo "⚠️ Group profile changes require an active session relog. Sudo overrides will step in for initialization."
 else
-    echo "✅ Docker Engine is already installed."
+    echo "✅ Docker Engine environment verified."
 fi
 
-# 3. Check and Install Docker Compose
+# Check and Install Docker Compose
 if ! docker compose version &> /dev/null; then
-    echo "📦 Docker Compose plugin not found. Installing package..."
-    sudo apt-get install -y docker-compose-plugin
+    if [ "$PKG_MANAGER" != "manual" ]; then
+        echo "📦 Docker Compose plugin missing. Provisioning dependency package..."
+        $INSTALL_DOCKER_COMP
+    else
+        echo "❌ Docker Compose command missing. Please install docker-compose manually on your OS environment."
+        exit 1
+    fi
 else
-    echo "✅ Docker Compose plugin is already installed."
+    echo "✅ Docker Compose core plugin verified."
 fi
 
-# 4. Check for .env Configuration
+# Check for .env Configuration
 if [ ! -f .env ]; then
-    echo -e "\n📝 .env configuration file missing! Creating a template..."
+    echo -e "\n📝 Environment setup missing! Creating a new configuration template..."
     cat << EOF > .env
 DISCORD_TOKEN=your_actual_discord_bot_token_here
 INPUT_DEVICE=hw:1,0
 EOF
-    echo "⚠️ A baseline '.env' file has been generated."
-    echo "👉 Please pause now, open '.env', and paste your real DISCORD_TOKEN before starting."
+    echo "⚠️ A new '.env' template file has been generated."
+    echo "👉 Please edit '.env' to enter your real DISCORD_TOKEN configuration before starting."
 else
-    # Quick sanity validation to make sure user didn't leave placeholder text
     if grep -q "your_actual_discord_bot_token_here" .env; then
-        echo -e "\n🛑 WARNING: Your .env file still contains the default token placeholder!"
-        echo "Please edit your '.env' file with a valid Discord application token before proceeding."
+        echo -e "\n🛑 WARNING: Your '.env' target file is currently pointing to placeholder data!"
+        echo "Update your '.env' parameters with actual application parameters before running."
     else
-        echo "✅ '.env' file validated with custom settings."
+        echo "✅ '.env' local configuration settings validated."
     fi
 fi
 
-# 5. Build and deploy containerized environment
-echo -e "\n🚀 Building and starting the Discord Stream Bot container..."
-# Use sudo here to ensure commands execute cleanly even if group privileges haven't refreshed yet
+# Build and deploy containerized environment
+echo -e "\n🚀 Compiling runtime architecture and spinning up background container instances..."
 sudo docker compose up -d --build
 
 echo -e "\n===================================================="
-echo "🎉 Setup complete! The bot is compiling in the background."
-echo "🤖 Container configuration 'restart: always' is active."
-echo "   The bot will automatically start whenever this OS boots."
+echo "🎉 Setup complete! The service application has been launched."
+echo "🤖 Active policy 'restart: always' is enforced."
+echo "   The application instance will spin up automatically on system boot."
 echo "===================================================="
-echo -e "\nTo view live stream audio initialization logs, run:"
+echo -e "\nTo inspect live audio stream data capture feeds, use:"
 echo "👉 sudo docker compose logs -f"
