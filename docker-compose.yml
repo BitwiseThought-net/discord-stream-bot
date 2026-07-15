@@ -1,0 +1,10 @@
+services:
+  discord-bot:
+    build: .
+    container_name: discord_audio_bot
+    restart: always
+    devices:
+      - /dev/snd:/dev/snd
+    environment:
+      - DISCORD_TOKEN=${DISCORD_TOKEN}
+      - INPUT_DEVICE=${INPUT_DEVICE}
