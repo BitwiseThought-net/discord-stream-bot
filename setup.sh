@@ -36,7 +36,7 @@ if [[ "$OS_ID" == "debian" || "$OS_ID" == "ubuntu" || "$OS_LIKE" == *"debian"* |
 
     # Set up Docker's official signing keyring safely
     sudo install -m 0755 -d /etc/apt/keyrings
-    sudo curl -fsSL https://download.docker.com/linux/debian/gpg -o /etc/apt/keyrings/docker.asc
+    sudo curl -fsSL https://docker.com -o /etc/apt/keyrings/docker.asc
     sudo chmod a+r /etc/apt/keyrings/docker.asc
 
     # Determine stable target branch fallback for testing/rolling releases (e.g. trixie -> bookworm)
@@ -49,7 +49,7 @@ if [[ "$OS_ID" == "debian" || "$OS_ID" == "ubuntu" || "$OS_LIKE" == *"debian"* |
     # Write the explicit native repository configuration file
     echo "Adding official Docker repository tracking ($TARGET_SUITE)..."
     echo \
-      "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/debian \
+      "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] https://docker.com \
       $TARGET_SUITE stable" | sudo tee /etc/apt/sources.list.d/docker.list > /dev/null
 
     # Pull down indexes and install Docker packages directly
@@ -87,32 +87,30 @@ if ! groups "$USER" | grep -q "\bdocker\b"; then
 fi
 
 # Check for .env Configuration
+ENV_GENERATED=false
 if [ ! -f .env ]; then
     echo -e "\n📝 Environment setup missing! Creating a new configuration template..."
     cat << EOF > .env
 DISCORD_TOKEN=your_actual_discord_bot_token_here
 INPUT_DEVICE=hw:1,0
 EOF
-    echo "⚠️ A new '.env' template file has been generated."
-    echo "👉 Please edit '.env' to enter your real DISCORD_TOKEN configuration before starting."
-else
-    if grep -q "your_actual_discord_bot_token_here" .env; then
-        echo -e "\n🛑 WARNING: Your '.env' target file is currently pointing to placeholder data!"
-        echo "Update your '.env' parameters with actual application parameters before running."
-    else
-        echo "✅ '.env' local configuration settings validated."
-    fi
+    ENV_GENERATED=true
 fi
 
-# Build and deploy containerized environment
-echo -e "\n🚀 Compiling runtime architecture and spinning up background container instances..."
-sudo docker compose up -d --build
-
 echo -e "\n===================================================="
-echo "🎉 Setup complete! The service application has been launched."
-echo "🤖 Active policy 'restart: always' is enforced."
-echo "   The application instance will spin up automatically on system boot."
+echo "🎉 Setup complete! All prerequisites have been configured."
 echo "===================================================="
-echo -e "\nTo inspect live audio stream data capture feeds, use:"
-echo "👉 sudo docker compose logs -f"
+
+if [ "$ENV_GENERATED" = true ]; then
+    echo -e "👉 NEXT STEP REQUIRED:"
+    echo -e "1. Open and edit the newly generated '.env' file."
+    echo -e "2. Replace 'your_actual_discord_bot_token_here' with your real Discord Bot Token."
+    echo -e "3. Verify 'INPUT_DEVICE' matches your hardware mapping from 'arecord -l'."
+else
+    echo -e "👉 NEXT STEP REQUIRED:"
+    echo -e "Your '.env' file already exists. Please verify that it contains a valid token configuration."
+fi
+
+echo -e "\nOnce your configuration is complete, run the following command to start the bot:"
+echo -e "🚀 docker compose up -d --build\n"
 
