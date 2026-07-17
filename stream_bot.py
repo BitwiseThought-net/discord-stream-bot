@@ -1,9 +1,14 @@
 import os
 import re
+import asyncio
 import discord
 from discord import app_commands
+from datetime import datetime, timedelta
 
 TOKEN = os.getenv('DISCORD_TOKEN')
+
+# Fetch the custom command name from environment, defaulting to 'stream' if missing
+COMMAND_NAME = os.getenv('COMMAND_BASE', 'stream').lower().strip()
 
 intents = discord.Intents.default()
 
@@ -11,8 +16,226 @@ class StreamBot(discord.Client):
     def __init__(self, *, intents: discord.Intents):
         super().__init__(intents=intents)
         self.tree = app_commands.CommandTree(self)
+        # Tracking active sleep and wake timer tasks per server guild
+        self.sleep_tasks = {}
+        self.wake_tasks = {}
 
     async def setup_hook(self):
+        print(f"Creating dynamic slash command group: /{COMMAND_NAME}")
+        stream_group = app_commands.Group(
+            name=COMMAND_NAME, 
+            description=f"Commands to manage the live audio {COMMAND_NAME}."
+        )
+
+        @stream_group.command(name="start", description="Joins your voice channel and starts the live audio feed.")
+        async def start_stream(interaction: discord.Interaction):
+            if not interaction.user.voice:
+                await interaction.response.send_message("You must be in a voice channel to start streaming!", ephemeral=True)
+                return
+
+            channel = interaction.user.voice.channel
+            await interaction.response.send_message(f"Connecting to {channel.name}... Please wait.")
+            vc = await channel.connect()
+
+            input_device, detected_channels = discover_hardware_profile()
+
+            ffmpeg_options = {
+                'before_options': f'-nostdin -f alsa -ac {detected_channels} -ar 44100',
+                'options': ''
+            }
+
+            await interaction.followup.send(f"Connected! Now streaming live hardware audio ({detected_channels}-channel mode) from input: {input_device}")
+            
+            raw_source = discord.FFmpegPCMAudio(input_device, **ffmpeg_options)
+            vc.play(discord.PCMVolumeTransformer(raw_source, volume=1.0))
+
+        @stream_group.command(name="stop", description="Stops the active feed and leaves the voice channel.")
+        async def stop_stream(interaction: discord.Interaction):
+            guild_id = interaction.guild.id
+            
+            # Cancel any pending sleep timer for this server if it exists
+            if guild_id in self.sleep_tasks:
+                self.sleep_tasks[guild_id].cancel()
+                del self.sleep_tasks[guild_id]
+
+            if interaction.guild.voice_client:
+                await interaction.guild.voice_client.disconnect()
+                await interaction.response.send_message("Stopped streaming and disconnected.")
+            else:
+                await interaction.response.send_message("I am not currently connected to a voice channel.", ephemeral=True)
+
+        @stream_group.command(name="volume", description="Adjusts the volume of the audio feed on the fly.")
+        @app_commands.describe(percentage="The target volume percentage from 0 to 100.")
+        async def adjust_volume(interaction: discord.Interaction, percentage: app_commands.Range[int, 0, 100]):
+            vc = interaction.guild.voice_client
+            
+            if not vc or not vc.source:
+                await interaction.response.send_message("The bot is not currently streaming!", ephemeral=True)
+                return
+
+            if isinstance(vc.source, discord.PCMVolumeTransformer):
+                vc.source.volume = percentage / 100.0
+                await interaction.response.send_message(f"🎵 Volume set to **{percentage}%**.")
+            else:
+                await interaction.response.send_message("Volume control wrapper not ready on this stream layout.", ephemeral=True)
+
+        @stream_group.command(name="sleep", description="Sets a sleep timer to automatically turn off the stream.")
+        @app_commands.describe(duration="Time string like '3:34pm', '45s', '15m', or '1.5h'.")
+        async def sleep_timer(interaction: discord.Interaction, duration: str):
+            guild_id = interaction.guild.id
+            vc = interaction.guild.voice_client
+
+            if not vc:
+                await interaction.response.send_message("The bot must be connected to a voice channel to set a sleep timer!", ephemeral=True)
+                return
+
+            raw_input = duration.lower().strip()
+            delay_seconds = None
+
+            relative_match = re.match(r"^([0-9.]+)\s*([a-z]+)$", raw_input)
+            
+            if relative_match:
+                value = float(relative_match.group(1))
+                unit = relative_match.group(2)
+                
+                if unit in ['s', 'sec', 'second', 'seconds']:
+                    delay_seconds = value
+                elif unit in ['m', 'min', 'minute', 'minutes']:
+                    delay_seconds = value * 60
+                elif unit in ['h', 'hr', 'hour', 'hours']:
+                    delay_seconds = value * 3600
+                else:
+                    await interaction.response.send_message("⚠️ Unrecognized duration unit. Please use seconds, minutes, or hours.", ephemeral=True)
+                    return
+            else:
+                time_formats = ["%I:%M%p", "%I:%M %p", "%H:%M"]
+                now = datetime.now()
+                
+                for fmt in time_formats:
+                    try:
+                        parsed_time = datetime.strptime(raw_input.upper(), fmt)
+                        target_dt = now.replace(hour=parsed_time.hour, minute=parsed_time.minute, second=0, microsecond=0)
+                        if target_dt < now:
+                            target_dt += timedelta(days=1)
+                        delay_seconds = (target_dt - now).total_seconds()
+                        break
+                    except ValueError:
+                        continue
+
+            if delay_seconds is None or delay_seconds <= 0:
+                await interaction.response.send_message("⚠️ Invalid time string format. Try inputs like `30m`, `1.5h`, or `11:45pm`.", ephemeral=True)
+                return
+
+            if guild_id in self.sleep_tasks:
+                self.sleep_tasks[guild_id].cancel()
+
+            async def sleep_worker(seconds, voice_client):
+                await asyncio.sleep(seconds)
+                if voice_client and voice_client.is_connected():
+                    await voice_client.disconnect()
+                    print(f"💤 Sleep timer reached. Automatically disconnected from server guild: {guild_id}")
+                if guild_id in self.sleep_tasks:
+                    del self.sleep_tasks[guild_id]
+
+            task = asyncio.create_task(sleep_worker(delay_seconds, vc))
+            self.sleep_tasks[guild_id] = task
+
+            total_minutes = int(delay_seconds // 60)
+            remaining_seconds = int(delay_seconds % 60)
+            time_display = f"{total_minutes}m {remaining_seconds}s" if total_minutes > 0 else f"{remaining_seconds} seconds"
+            await interaction.response.send_message(f"💤 Sleep timer locked in! The stream will turn off in **{time_display}**.")
+
+        @stream_group.command(name="wake", description="Sets a wake timer to automatically turn on the stream.")
+        @app_commands.describe(duration="Time string like '7:00am', '10s', '5m', or '1h'.")
+        async def wake_timer(interaction: discord.Interaction, duration: str):
+            guild_id = interaction.guild.id
+            
+            # Ensure the scheduling user is in a voice channel so the bot knows where to wake up
+            if not interaction.user.voice:
+                await interaction.response.send_message("⚠️ You must be inside a voice channel when running this command so the bot knows where to connect!", ephemeral=True)
+                return
+
+            target_channel = interaction.user.voice.channel
+            raw_input = duration.lower().strip()
+            delay_seconds = None
+
+            # Parse Relative Formats
+            relative_match = re.match(r"^([0-9.]+)\s*([a-z]+)$", raw_input)
+            if relative_match:
+                value = float(relative_match.group(1))
+                unit = relative_match.group(2)
+                
+                if unit in ['s', 'sec', 'second', 'seconds']:
+                    delay_seconds = value
+                elif unit in ['m', 'min', 'minute', 'minutes']:
+                    delay_seconds = value * 60
+                elif unit in ['h', 'hr', 'hour', 'hours']:
+                    delay_seconds = value * 3600
+                else:
+                    await interaction.response.send_message("⚠️ Unrecognized wake duration unit. Use seconds, minutes, or hours.", ephemeral=True)
+                    return
+            # Parse Absolute Time Formats
+            else:
+                time_formats = ["%I:%M%p", "%I:%M %p", "%H:%M"]
+                now = datetime.now()
+                
+                for fmt in time_formats:
+                    try:
+                        parsed_time = datetime.strptime(raw_input.upper(), fmt)
+                        target_dt = now.replace(hour=parsed_time.hour, minute=parsed_time.minute, second=0, microsecond=0)
+                        if target_dt < now:
+                            target_dt += timedelta(days=1)
+                        delay_seconds = (target_dt - now).total_seconds()
+                        break
+                    except ValueError:
+                        continue
+
+            if delay_seconds is None or delay_seconds <= 0:
+                await interaction.response.send_message("⚠️ Invalid wake time format. Try inputs like `10m`, `1h`, or `7:30am`.", ephemeral=True)
+                return
+
+            # Cancel any pending wake timer task running on this server guild
+            if guild_id in self.wake_tasks:
+                self.wake_tasks[guild_id].cancel()
+
+            # Define background wake worker execution block
+            async def wake_worker(seconds, channel_target):
+                await asyncio.sleep(seconds)
+                
+                # Check if the bot is already streaming somewhere in the guild
+                if interaction.guild.voice_client:
+                    if interaction.guild.voice_client.is_connected():
+                        await interaction.guild.voice_client.disconnect()
+                
+                try:
+                    vc = await channel_target.connect()
+                    input_device, detected_channels = discover_hardware_profile()
+                    
+                    ffmpeg_options = {
+                        'before_options': f'-nostdin -f alsa -ac {detected_channels} -ar 44100',
+                        'options': ''
+                    }
+                    
+                    raw_source = discord.FFmpegPCMAudio(input_device, **ffmpeg_options)
+                    vc.play(discord.PCMVolumeTransformer(raw_source, volume=1.0))
+                    print(f"⏰ Wake timer reached! Automatically streaming to channel: {channel_target.name}")
+                except Exception as e:
+                    print(f"❌ Wake timer worker failed to connect/stream: {e}")
+
+                if guild_id in self.wake_tasks:
+                    del self.wake_tasks[guild_id]
+
+            # Fire off the async task into the background execution loop
+            task = asyncio.create_task(wake_worker(delay_seconds, target_channel))
+            self.wake_tasks[guild_id] = task
+
+            total_minutes = int(delay_seconds // 60)
+            remaining_seconds = int(delay_seconds % 60)
+            time_display = f"{total_minutes}m {remaining_seconds}s" if total_minutes > 0 else f"{remaining_seconds} seconds"
+            
+            await interaction.response.send_message(f"⏰ Wake timer locked in! The bot will automatically join **{target_channel.name}** and start streaming in **{time_display}**.")
+
+        self.tree.add_command(stream_group)
         print("Syncing slash commands globally...")
         await self.tree.sync()
 
@@ -25,8 +248,6 @@ def discover_hardware_profile():
     Returns a tuple of (device_string, channel_count_string).
     """
     base_dir = "/mnt/asound"
-    
-    # Fallback defaults if no hardware files are present
     default_device = "plughw:1,0"
     default_channels = "2"
 
@@ -63,40 +284,6 @@ async def on_ready():
     print(f"Streaming bot successfully logged in as {bot.user.name}")
     dev, ch = discover_hardware_profile()
     print(f"Startup scan check -> Device: {dev} | Channels: {ch}")
-
-@bot.tree.command(name="start", description="Joins your voice channel and starts streaming live hardware audio.")
-async def start(interaction: discord.Interaction):
-    """Slash command to start the live stream using automatic hardware channel detection."""
-    if not interaction.user.voice:
-        await interaction.response.send_message("You must be in a voice channel to start streaming!", ephemeral=True)
-        return
-
-    channel = interaction.user.voice.channel
-    await interaction.response.send_message(f"Connecting to {channel.name}... Please wait.")
-    vc = await channel.connect()
-
-    # Dynamically locate the correct hardware card index and its channel parameters
-    input_device, detected_channels = discover_hardware_profile()
-
-    # The -i flag is handled entirely by the library using the first positional argument below
-    ffmpeg_options = {
-        'before_options': f'-nostdin -f alsa -ac {detected_channels} -ar 44100',
-        'options': ''
-    }
-
-    await interaction.followup.send(f"Connected! Now streaming live hardware audio ({detected_channels}-channel mode) from input: {input_device}")
-    
-    # FIXED: Passing the dynamically discovered device name straight as the core source
-    vc.play(discord.FFmpegPCMAudio(input_device, **ffmpeg_options))
-
-@bot.tree.command(name="stop", description="Stops streaming and leaves the voice channel.")
-async def stop(interaction: discord.Interaction):
-    """Slash command to stop the live stream."""
-    if interaction.guild.voice_client:
-        await interaction.guild.voice_client.disconnect()
-        await interaction.response.send_message("Stopped streaming and disconnected.")
-    else:
-        await interaction.response.send_message("I am not currently connected to a voice channel.", ephemeral=True)
 
 if __name__ == "__main__":
     if not TOKEN:
