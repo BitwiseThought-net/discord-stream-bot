@@ -138,8 +138,8 @@ class StreamBot(discord.Client):
                 await interaction.response.send_message("Volume control wrapper not ready on this stream layout.", ephemeral=True)
 
         @stream_group.command(name="sleep", description="Sets a sleep timer to automatically turn off the stream.")
-        @app_commands.describe(duration="Time string like '3:34pm', '45s', '15m', or '1.5h'.")
-        async def sleep_timer(interaction: discord.Interaction, duration: str):
+        @app_commands.describe(time="Time string like '3:34pm', '45s', '15m', or '1.5h'.")
+        async def sleep_timer(interaction: discord.Interaction, time: str):
             guild_id = interaction.guild.id
             vc = interaction.guild.voice_client
 
@@ -147,7 +147,7 @@ class StreamBot(discord.Client):
                 await interaction.response.send_message("The {bot.user.name} must be connected to a voice channel to set a sleep timer!", ephemeral=True)
                 return
 
-            raw_input = duration.lower().strip()
+            raw_input = time.lower().strip()
             delay_seconds = None
 
             relative_match = re.match(r"^([0-9.]+)\s*([a-z]+)$", raw_input)
@@ -158,7 +158,7 @@ class StreamBot(discord.Client):
                 elif unit in ['m', 'min', 'minute', 'minutes']: delay_seconds = value * 60
                 elif unit in ['h', 'hr', 'hour', 'hours']: delay_seconds = value * 3600
                 else:
-                    await interaction.response.send_message("⚠️ Unrecognized duration unit. Please use seconds, minutes, or hours.", ephemeral=True)
+                    await interaction.response.send_message("⚠️ Unrecognized time unit. Please use seconds, minutes, or hours.", ephemeral=True)
                     return
             else:
                 time_formats = ["%I:%M%p", "%I:%M %p", "%H:%M"]
@@ -197,15 +197,15 @@ class StreamBot(discord.Client):
             await interaction.response.send_message(f"💤 Sleep timer set. {COMMAND_NAME.capitalize()} will turn off in **{time_display}**.")
 
         @stream_group.command(name="wake", description="Sets a wake timer to automatically turn on the stream.")
-        @app_commands.describe(duration="Time string like '7:00am', '10s', '5m', or '1h'.")
-        async def wake_timer(interaction: discord.Interaction, duration: str):
+        @app_commands.describe(time="Time string like '7:00am', '10s', '5m', or '1h'.")
+        async def wake_timer(interaction: discord.Interaction, time: str):
             guild_id = interaction.guild.id
             if not interaction.user.voice:
                 await interaction.response.send_message("⚠️ You must be inside a voice channel when running this command so the {bot.user.name} knows where to connect!", ephemeral=True)
                 return
 
             target_channel = interaction.user.voice.channel
-            raw_input = duration.lower().strip()
+            raw_input = time.lower().strip()
             delay_seconds = None
 
             relative_match = re.match(r"^([0-9.]+)\s*([a-z]+)$", raw_input)
@@ -216,7 +216,7 @@ class StreamBot(discord.Client):
                 elif unit in ['m', 'min', 'minute', 'minutes']: delay_seconds = value * 60
                 elif unit in ['h', 'hr', 'hour', 'hours']: delay_seconds = value * 3600
                 else:
-                    await interaction.response.send_message("⚠️ Unrecognized wake duration unit. Use seconds, minutes, or hours.", ephemeral=True)
+                    await interaction.response.send_message("⚠️ Unrecognized wake time unit. Use seconds, minutes, or hours.", ephemeral=True)
                     return
             else:
                 time_formats = ["%I:%M%p", "%I:%M %p", "%H:%M"]
