@@ -1,13 +1,17 @@
 # Discord Stream Bot
 
-A lightweight, containerized Discord bot built for Linux environments. This bot captures a continuous, live hardware audio feed from your computer's line-in or microphone interface and streams it directly into a Discord voice channel with minimal latency using modern native slash commands.
+A lightweight, containerized Discord bot built for Linux environments (including compact single-board systems like the Raspberry Pi). This bot captures a continuous, live hardware audio feed from your computer's line-in or microphone interface and streams it directly into a Discord voice channel with minimal latency using modern native slash commands.
 
 ## Key Features
 * 🐳 **Fully Containerized:** Uses Docker and Docker Compose for a clean, zero-pollution setup on your host OS.
 * 🔄 **Auto-Start on Boot:** Configured to instantly spin up and reconnect if the host environment restarts or loses power.
-* 🛠️ **Hardware Independent:** Configuration settings are handled completely through environment variables—no need to touch code.
+* 🛠️ **Zero Manual Coding Configuration:** Configuration settings are handled completely through environment variables.
 * 📜 **Automated Installer:** Includes a cross-distro bash setup script that configures required dependencies automatically across Debian/Ubuntu, Fedora/RHEL, and Arch Linux ecosystems.
-* 🚀 **Slash Commands:** Integrated via native Discord application commands (`/start` and `/stop`) requiring no privileged message intents.
+* 🚀 **Custom Dynamic Slash Commands:** The root name of the slash command group can be parameterized right in your environment configuration (e.g., `/radio start` vs `/stream start`).
+* 🔍 **Automated Hardware Discovery:** The bot scans hardware capabilities on startup to automatically determine correct ALSA card assignments and mono/stereo channel capability mappings.
+* 🎵 **On-the-Fly Volume Control:** Allows users to slide audio volume constraints smoothly between 0% and 100% at runtime natively in Discord.
+* 💤 **Sleep & Wake Timers:** Features flexible absolute (e.g., `3:34pm`) and relative (e.g., `45m`, `1.5h`) duration arguments to handle automated connection and disconnection rules.
+* 💾 **Persistent Crash Recovery Engine:** Tracks streaming coordinates securely via a read-write volume mounting layer so the bot can automatically resume its previous voice broadcast channel location on boot.
 
 ---
 
@@ -31,31 +35,14 @@ discord-stream-bot/
 
 ---
 
-## Step 1: Find Your Hardware Device Input Name
-Before configuring the bot, you must find out which hardware index ALSA (the Linux sound subsystem) has assigned to your audio interface capture device.
-
-Run the following command on your terminal:
-```bash
-arecord -l
-```
-
-Look for your target audio input source. The output will look something like this:
-```text
-**** List of CAPTURE Hardware Devices ****
-card 1: USB [USB Audio], device 0: USB Audio [USB Audio]
-```
-Note the **card number** and **device number**. In the example above (Card 1, Device 0), the hardware identifier format is `hw:1,0`.
-
----
-
-## Step 2: Discord Developer Portal Requirements & Invite Link
+## Step 1: Discord Developer Portal Requirements & Invite Link
 Because this framework uses slash commands, you **do not need** to turn on the "Message Content Intent" toggle. Follow these steps to configure application scopes and create your server invite link:
 
 1. Open the [Discord Developer Portal](https://discord.com/developers/home) and select your application dashboard.
 2. Navigate to the **OAuth2** tab in the left sidebar, then click on **URL Generator**.
 3. Under the **Scopes** section, check the following two boxes:
    * [x] `bot`
-   * [x] `applications.commands` *(This allows your bot to inject `/start` and `/stop` directly into Discord's interface)*
+   * [x] `applications.commands` *(This allows your bot to inject custom subcommands directly into Discord's interface)*
 4. Scroll down to the **Bot Permissions** section that appears below and select:
    * **Text Permissions:** `Send Messages`
    * **Voice Permissions:** `Connect` and `Speak`
@@ -63,9 +50,9 @@ Because this framework uses slash commands, you **do not need** to turn on the "
 
 ---
 
-## Step 3: Installation & Deployment
+## Step 2: Installation & Deployment
 
-You can deploy the entire setup automatically using the `setup.sh` script. This script automatically detects your Linux base, updates native package mirrors, configures Docker and Docker Compose layers if missing, provisions configuration files, and deploys the background process.
+You can deploy the entire setup automatically using the `setup.sh` script. This script automatically detects your Linux base, updates native package mirrors, configures Docker and Docker Compose layers if missing, provisions configuration files, and analyzes your audio device cards.
 
 1. Give the setup script permissions to execute:
    ```bash
@@ -75,17 +62,16 @@ You can deploy the entire setup automatically using the `setup.sh` script. This 
    ```bash
    ./setup.sh
    ```
-3. Open the newly generated `.env` file and insert your real Discord Token and the hardware identifier found in Step 1:
+3. Open the newly generated `.env` file and insert your real Discord Token and desired structural configurations:
    ```env
    DISCORD_TOKEN=your_actual_discord_bot_token_here
-   INPUT_DEVICE=hw:1,0
+   COMMAND_BASE=radio
+   RECOVERY_MODE=resume
    ```
-4. Finalize the setup by restarting your container engine parameters to load your updated token variables:
+4. Finalize the setup by compiling your container infrastructure to load your updated token parameters:
    ```bash
    docker compose up -d --build
    ```
-
-*Because the `restart: always` directive is declared within the compose block, the system daemon architecture will seamlessly spin up the stream application instance every single time your host machine undergoes a boot execution lifecycle.*
 
 ---
 
@@ -107,7 +93,10 @@ You can deploy the entire setup automatically using the `setup.sh` script. This 
 ---
 
 ## Commands
-Type these commands into any text channel visible to the bot inside your authorized server:
+*Assuming `COMMAND_BASE=radio` inside your `.env` configuration file (type these instructions into any text channel visible to the bot inside your authorized server):*
 
-* `/start` - Directs the bot to join your active voice channel, initialize hardware layouts, and begin piping your live PC audio stream feed.
-* `/stop` - Terminates the active FFmpeg audio recording channel and safely disconnects the bot from voice.
+* `/radio start` - Directs the bot to join your active voice channel, auto-detect hardware variables, and begin piping your live PC audio stream.
+* `/radio stop` - Terminates the active FFmpeg session, flushes current crash recovery data states, and safely disconnects the bot from voice.
+* `/radio volume <0-100>` - Dynamically modifies stream playback amplitude parameters on the fly via a native integer slider inside Discord.
+* `/radio sleep <duration>` - Configures a sleep timer to automatically disconnect after a set time. Accepts relative intervals (e.g., `45s`, `15m`, `1.5h`) or absolute timeline positions (e.g., `11:45pm`, `14:30`).
+* `/radio wake <duration>` - Configures a wake timer based on the user's active channel position. When the absolute or relative duration value hits zero, the bot automatically wakes up, joins that voice slot, and resumes encoding live audio.
