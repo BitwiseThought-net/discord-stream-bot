@@ -7,6 +7,11 @@ services:
       - /dev/snd:/dev/snd
     volumes:
       - /proc/asound:/mnt/asound:ro
+      - bot_data:/data
     environment:
       - DISCORD_TOKEN=${DISCORD_TOKEN}
       - COMMAND_BASE=${COMMAND_BASE}
+      - RECOVERY_MODE=${RECOVERY_MODE}
+
+volumes:
+  bot_data:
