@@ -9,3 +9,4 @@ services:
       - /proc/asound:/mnt/asound:ro
     environment:
       - DISCORD_TOKEN=${DISCORD_TOKEN}
+      - COMMAND_BASE=${COMMAND_BASE}

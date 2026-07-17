@@ -5,6 +5,9 @@ from discord import app_commands
 
 TOKEN = os.getenv('DISCORD_TOKEN')
 
+# Fetch the custom command name from environment, defaulting to 'stream' if missing
+COMMAND_NAME = os.getenv('COMMAND_BASE', 'stream').lower().strip()
+
 intents = discord.Intents.default()
 
 class StreamBot(discord.Client):
@@ -13,6 +16,46 @@ class StreamBot(discord.Client):
         self.tree = app_commands.CommandTree(self)
 
     async def setup_hook(self):
+        # 1. Create a dynamic command group named after our .env parameter
+        print(f"Creating dynamic slash command group: /{COMMAND_NAME}")
+        stream_group = app_commands.Group(
+            name=COMMAND_NAME, 
+            description=f"Commands to manage the live audio {COMMAND_NAME}."
+        )
+
+        # 2. Define the sub-commands manually and link them to the group
+        @stream_group.command(name="start", description="Joins your voice channel and starts the live audio feed.")
+        async def start_stream(interaction: discord.Interaction):
+            if not interaction.user.voice:
+                await interaction.response.send_message("You must be in a voice channel to start streaming!", ephemeral=True)
+                return
+
+            channel = interaction.user.voice.channel
+            await interaction.response.send_message(f"Connecting to {channel.name}... Please wait.")
+            vc = await channel.connect()
+
+            input_device, detected_channels = discover_hardware_profile()
+
+            ffmpeg_options = {
+                'before_options': f'-nostdin -f alsa -ac {detected_channels} -ar 44100',
+                'options': ''
+            }
+
+            await interaction.followup.send(f"Connected! Now streaming live hardware audio ({detected_channels}-channel mode) from input: {input_device}")
+            vc.play(discord.FFmpegPCMAudio(input_device, **ffmpeg_options))
+
+        @stream_group.command(name="stop", description="Stops the active feed and leaves the voice channel.")
+        async def stop_stream(interaction: discord.Interaction):
+            if interaction.guild.voice_client:
+                await interaction.guild.voice_client.disconnect()
+                await interaction.response.send_message("Stopped streaming and disconnected.")
+            else:
+                await interaction.response.send_message("I am not currently connected to a voice channel.", ephemeral=True)
+
+        # 3. Add the fully populated group to the main command tree
+        self.tree.add_command(stream_group)
+
+        # 4. Sync commands globally with Discord's servers
         print("Syncing slash commands globally...")
         await self.tree.sync()
 
@@ -25,8 +68,6 @@ def discover_hardware_profile():
     Returns a tuple of (device_string, channel_count_string).
     """
     base_dir = "/mnt/asound"
-    
-    # Fallback defaults if no hardware files are present
     default_device = "plughw:1,0"
     default_channels = "2"
 
@@ -64,42 +105,9 @@ async def on_ready():
     dev, ch = discover_hardware_profile()
     print(f"Startup scan check -> Device: {dev} | Channels: {ch}")
 
-@bot.tree.command(name="start", description="Joins your voice channel and starts streaming live hardware audio.")
-async def start(interaction: discord.Interaction):
-    """Slash command to start the live stream using automatic hardware channel detection."""
-    if not interaction.user.voice:
-        await interaction.response.send_message("You must be in a voice channel to start streaming!", ephemeral=True)
-        return
-
-    channel = interaction.user.voice.channel
-    await interaction.response.send_message(f"Connecting to {channel.name}... Please wait.")
-    vc = await channel.connect()
-
-    # Dynamically locate the correct hardware card index and its channel parameters
-    input_device, detected_channels = discover_hardware_profile()
-
-    # The -i flag is handled entirely by the library using the first positional argument below
-    ffmpeg_options = {
-        'before_options': f'-nostdin -f alsa -ac {detected_channels} -ar 44100',
-        'options': ''
-    }
-
-    await interaction.followup.send(f"Connected! Now streaming live hardware audio ({detected_channels}-channel mode) from input: {input_device}")
-    
-    # FIXED: Passing the dynamically discovered device name straight as the core source
-    vc.play(discord.FFmpegPCMAudio(input_device, **ffmpeg_options))
-
-@bot.tree.command(name="stop", description="Stops streaming and leaves the voice channel.")
-async def stop(interaction: discord.Interaction):
-    """Slash command to stop the live stream."""
-    if interaction.guild.voice_client:
-        await interaction.guild.voice_client.disconnect()
-        await interaction.response.send_message("Stopped streaming and disconnected.")
-    else:
-        await interaction.response.send_message("I am not currently connected to a voice channel.", ephemeral=True)
-
 if __name__ == "__main__":
     if not TOKEN:
         print("Error: DISCORD_TOKEN variable is missing. Check your .env file.")
     else:
         bot.run(TOKEN)
+
