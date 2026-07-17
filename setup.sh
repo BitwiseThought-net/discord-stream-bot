@@ -71,10 +71,29 @@ fi
 
 # Check and Install Docker Engine
 if ! command -v docker &> /dev/null; then
-    echo "📦 Docker not found. Deploying via official Docker get script..."
-    curl -fsSL https://docker.com -o get-docker.sh
+    echo "📦 Docker not found. Deploying via official Docker installer convenience script..."
+    
+    # Secure download fallback logic
+    if command -v curl &> /dev/null; then
+        curl -fsSL https://docker.com -o get-docker.sh || true
+    fi
+    
+    # If curl failed or is missing, attempt fallback with wget
+    if [ ! -s get-docker.sh ] && command -v wget &> /dev/null; then
+        echo "🌐 Curl failed or missing. Retrying download using wget..."
+        wget -qO get-docker.sh https://docker.com || true
+    fi
+
+    # Absolute safety check: Validate that the file downloaded and is not empty/HTML error markup
+    if [ ! -s get-docker.sh ] || grep -q "<html" get-docker.sh; then
+        echo "❌ Critical Error: Unable to securely fetch the official Docker installation script."
+        echo "Please verify your internet connection or install Docker manually via your package manager."
+        rm -f get-docker.sh
+        exit 1
+    fi
+
     sudo sh get-docker.sh
-    rm get-docker.sh
+    rm -f get-docker.sh
     
     echo "👤 Adding $USER to the system 'docker' security group..."
     sudo usermod -aG docker "$USER"
@@ -125,3 +144,4 @@ echo "   The application instance will spin up automatically on system boot."
 echo "===================================================="
 echo -e "\nTo inspect live audio stream data capture feeds, use:"
 echo "👉 sudo docker compose logs -f"
+
