@@ -5,7 +5,7 @@ services:
     restart: always
     devices:
       - /dev/snd:/dev/snd
+    volumes:
+      - /proc/asound:/mnt/asound:ro
     environment:
       - DISCORD_TOKEN=${DISCORD_TOKEN}
-      - INPUT_DEVICE=${INPUT_DEVICE}
-      - INPUT_MODE=${INPUT_MODE}
