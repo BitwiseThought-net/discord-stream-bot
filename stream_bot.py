@@ -10,7 +10,6 @@ TOKEN = os.getenv('DISCORD_TOKEN')
 COMMAND_NAME = os.getenv('COMMAND_BASE', 'stream').lower().strip()
 RECOVERY_MODE = os.getenv('RECOVERY_MODE', 'stay_disconnected').lower().strip()
 
-# Path to the persistent volume mount file tracker
 STATE_FILE = "/data/state.json"
 
 intents = discord.Intents.default()
@@ -53,12 +52,12 @@ def discover_hardware_profile():
         if entry.startswith("card") and os.path.isdir(os.path.join(base_dir, entry)):
             card_num = entry.replace("card", "").strip()
             stream_file = os.path.join(base_dir, entry, "stream0")
-            
+
             if os.path.exists(stream_file):
                 try:
                     with open(stream_file, 'r') as f:
                         content = f.read().lower()
-                        
+
                     discovered_device = f"plughw:{card_num},0"
                     if "1 channel" in content and "2 channels" not in content:
                         print(f"🎯 [Discovery] Dynamically mapped active MONO USB device: {discovered_device}")
@@ -94,7 +93,7 @@ class StreamBot(discord.Client):
 
             channel = interaction.user.voice.channel
             await interaction.response.send_message(f"Connecting to {channel.name}... Please wait.")
-            
+
             vc = await channel.connect()
             input_device, detected_channels = discover_hardware_profile()
 
@@ -103,10 +102,9 @@ class StreamBot(discord.Client):
                 'options': ''
             }
 
-            # Save coordinates to persistence disk layer before initiating voice playback loops
             save_stream_state(interaction.guild.id, channel.id)
 
-            await interaction.followup.send(f"Connected! Now streaming live hardware audio ({detected_channels}-channel mode) from input: {input_device}")
+            await interaction.followup.send(f"🎵 Now streaming.")
             raw_source = discord.FFmpegPCMAudio(input_device, **ffmpeg_options)
             vc.play(discord.PCMVolumeTransformer(raw_source, volume=1.0))
 
@@ -117,26 +115,25 @@ class StreamBot(discord.Client):
                 self.sleep_tasks[guild_id].cancel()
                 del self.sleep_tasks[guild_id]
 
-            # Clear persistence footprint instantly upon a clean manual exit parameter command
             clear_stream_state()
 
             if interaction.guild.voice_client:
                 await interaction.guild.voice_client.disconnect()
                 await interaction.response.send_message("Stopped streaming and disconnected.")
             else:
-                await interaction.response.send_message("I am not currently connected to a voice channel.", ephemeral=True)
+                await interaction.response.send_message("Not currently connected to a voice channel.", ephemeral=True)
 
         @stream_group.command(name="volume", description="Adjusts the volume of the audio feed on the fly.")
         @app_commands.describe(percentage="The target volume percentage from 0 to 100.")
         async def adjust_volume(interaction: discord.Interaction, percentage: app_commands.Range[int, 0, 100]):
             vc = interaction.guild.voice_client
             if not vc or not vc.source:
-                await interaction.response.send_message("The bot is not currently streaming!", ephemeral=True)
+                await interaction.response.send_message("The {COMMAND_NAME} is not currently streaming!", ephemeral=True)
                 return
 
             if isinstance(vc.source, discord.PCMVolumeTransformer):
                 vc.source.volume = percentage / 100.0
-                await interaction.response.send_message(f"🎵 Volume set to **{percentage}%**.")
+                await interaction.response.send_message(f"🔊 Volume set to **{percentage}%**.")
             else:
                 await interaction.response.send_message("Volume control wrapper not ready on this stream layout.", ephemeral=True)
 
@@ -147,7 +144,7 @@ class StreamBot(discord.Client):
             vc = interaction.guild.voice_client
 
             if not vc:
-                await interaction.response.send_message("The bot must be connected to a voice channel to set a sleep timer!", ephemeral=True)
+                await interaction.response.send_message("The {bot.user.name} must be connected to a voice channel to set a sleep timer!", ephemeral=True)
                 return
 
             raw_input = duration.lower().strip()
@@ -184,7 +181,7 @@ class StreamBot(discord.Client):
 
             async def sleep_worker(seconds, voice_client):
                 await asyncio.sleep(seconds)
-                clear_stream_state() # Flush tracking state upon timer timeout disconnection triggers
+                clear_stream_state()
                 if voice_client and voice_client.is_connected():
                     await voice_client.disconnect()
                     print(f"💤 Sleep timer reached. Automatically disconnected from server guild: {guild_id}")
@@ -197,14 +194,14 @@ class StreamBot(discord.Client):
             total_minutes = int(delay_seconds // 60)
             remaining_seconds = int(delay_seconds % 60)
             time_display = f"{total_minutes}m {remaining_seconds}s" if total_minutes > 0 else f"{remaining_seconds} seconds"
-            await interaction.response.send_message(f"💤 Sleep timer locked in! The stream will turn off in **{time_display}**.")
+            await interaction.response.send_message(f"💤 Sleep timer set. {COMMAND_NAME.capitalize()} will turn off in **{time_display}**.")
 
         @stream_group.command(name="wake", description="Sets a wake timer to automatically turn on the stream.")
         @app_commands.describe(duration="Time string like '7:00am', '10s', '5m', or '1h'.")
         async def wake_timer(interaction: discord.Interaction, duration: str):
             guild_id = interaction.guild.id
             if not interaction.user.voice:
-                await interaction.response.send_message("⚠️ You must be inside a voice channel when running this command so the bot knows where to connect!", ephemeral=True)
+                await interaction.response.send_message("⚠️ You must be inside a voice channel when running this command so the {bot.user.name} knows where to connect!", ephemeral=True)
                 return
 
             target_channel = interaction.user.voice.channel
@@ -248,8 +245,7 @@ class StreamBot(discord.Client):
                 try:
                     vc = await channel_target.connect()
                     input_device, detected_channels = discover_hardware_profile()
-                    
-                    # Track coordinates when wake target initiates stream natively
+
                     save_stream_state(guild_id, channel_target.id)
 
                     ffmpeg_options = {
@@ -271,7 +267,7 @@ class StreamBot(discord.Client):
             total_minutes = int(delay_seconds // 60)
             remaining_seconds = int(delay_seconds % 60)
             time_display = f"{total_minutes}m {remaining_seconds}s" if total_minutes > 0 else f"{remaining_seconds} seconds"
-            await interaction.response.send_message(f"⏰ Wake timer locked in! The bot will automatically join **{target_channel.name}** and start streaming in **{time_display}**.")
+            await interaction.response.send_message(f"⏰ Wake timer set. {COMMAND_NAME.capitalize()} will automatically start streaming in **{time_display}**.")
 
         self.tree.add_command(stream_group)
         print("Syncing slash commands globally...")
@@ -281,28 +277,27 @@ bot = StreamBot(intents=intents)
 
 @bot.event
 async def on_ready():
-    print(f"Streaming bot successfully logged in as {bot.user.name}")
+    print(f"Streaming {COMMAND_NAME} successfully logged in as {bot.user.name}")
     dev, ch = discover_hardware_profile()
     print(f"Startup scan check -> Device: {dev} | Channels: {ch}")
     print(f"Configured recovery initialization policy mode: '{RECOVERY_MODE}'")
 
-    # RECOVERY AGENT HANDLER BLOCK Execution tracking setup
     if RECOVERY_MODE == "resume":
         if os.path.exists(STATE_FILE):
             try:
                 with open(STATE_FILE, 'r') as f:
                     state = json.load(f)
-                
+
                 guild_id = state.get("guild_id")
                 channel_id = state.get("channel_id")
-                
+
                 print(f"🔄 [Recovery] Active crash footprint trace discovered for Channel ID: {channel_id}")
                 channel = bot.get_channel(channel_id)
-                
+
                 if channel and isinstance(channel, discord.VoiceChannel):
                     print(f"🔄 [Recovery] Reconnecting to channel: '{channel.name}'...")
                     vc = await channel.connect()
-                    
+
                     input_device, detected_channels = discover_hardware_profile()
                     ffmpeg_options = {
                         'before_options': f'-nostdin -f alsa -ac {detected_channels} -ar 44100',
