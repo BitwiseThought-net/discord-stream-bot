@@ -51,7 +51,7 @@ Note the **card number** and **device number**. In the example above (Card 1, De
 ## Step 2: Discord Developer Portal Requirements & Invite Link
 Because this framework uses slash commands, you **do not need** to turn on the "Message Content Intent" toggle. Follow these steps to configure application scopes and create your server invite link:
 
-1. Open the [Discord Developer Portal](https://discord.com) and select your application dashboard.
+1. Open the [Discord Developer Portal](https://discord.com/developers/home) and select your application dashboard.
 2. Navigate to the **OAuth2** tab in the left sidebar, then click on **URL Generator**.
 3. Under the **Scopes** section, check the following two boxes:
    * [x] `bot`
