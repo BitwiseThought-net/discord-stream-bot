@@ -68,6 +68,12 @@ You can deploy the entire setup automatically using the `setup.sh` script. This 
    COMMAND_BASE=radio
    RECOVERY_MODE=resume
    ```
+
+### RECOVERY_MODE Options
+The `RECOVERY_MODE` variable manages how the bot responds when the container engine restarts or reboots:
+* `resume` – Automatically checks the persistent storage layer for previous broadcast sessions. If a crash or restart occurs mid-stream, the bot immediately rejoins the last active voice channel and resumes the audio feed.
+* `stay_disconnected` – Wipes any historical streaming footprints on startup. The bot stays completely disconnected and idle until a user manually issues a start command in chat.
+
 4. Finalize the setup by compiling your container infrastructure to load your updated token parameters:
    ```bash
    docker compose up -d --build
@@ -98,5 +104,5 @@ You can deploy the entire setup automatically using the `setup.sh` script. This 
 * `/radio start` - Directs the bot to join your active voice channel, auto-detect hardware variables, and begin piping your live PC audio stream.
 * `/radio stop` - Terminates the active FFmpeg session, flushes current crash recovery data states, and safely disconnects the bot from voice.
 * `/radio volume <0-100>` - Dynamically modifies stream playback amplitude parameters on the fly via a native integer slider inside Discord.
-* `/radio sleep <duration>` - Configures a sleep timer to automatically disconnect after a set time. Accepts relative intervals (e.g., `45s`, `15m`, `1.5h`) or absolute timeline positions (e.g., `11:45pm`, `14:30`).
-* `/radio wake <duration>` - Configures a wake timer based on the user's active channel position. When the absolute or relative duration value hits zero, the bot automatically wakes up, joins that voice slot, and resumes encoding live audio.
+* `/radio sleep <time>` - Configures a sleep timer to automatically disconnect after a set time. Accepts relative intervals (e.g., `45s`, `15m`, `1.5h`) or absolute timeline positions (e.g., `11:45pm`, `14:30`).
+* `/radio wake <time>` - Configures a wake timer based on the user's active channel position. When the absolute or relative duration value hits zero, the bot automatically wakes up, joins that voice slot, and resumes encoding live audio.
