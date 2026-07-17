@@ -16,14 +16,12 @@ class StreamBot(discord.Client):
         self.tree = app_commands.CommandTree(self)
 
     async def setup_hook(self):
-        # 1. Create a dynamic command group named after our .env parameter
         print(f"Creating dynamic slash command group: /{COMMAND_NAME}")
         stream_group = app_commands.Group(
             name=COMMAND_NAME, 
             description=f"Commands to manage the live audio {COMMAND_NAME}."
         )
 
-        # 2. Define the sub-commands manually and link them to the group
         @stream_group.command(name="start", description="Joins your voice channel and starts the live audio feed.")
         async def start_stream(interaction: discord.Interaction):
             if not interaction.user.voice:
@@ -42,7 +40,10 @@ class StreamBot(discord.Client):
             }
 
             await interaction.followup.send(f"Connected! Now streaming live hardware audio ({detected_channels}-channel mode) from input: {input_device}")
-            vc.play(discord.FFmpegPCMAudio(input_device, **ffmpeg_options))
+            
+            # Wrap the base FFmpeg player inside PCMVolumeTransformer to unlock on-the-fly volume adjustments
+            raw_source = discord.FFmpegPCMAudio(input_device, **ffmpeg_options)
+            vc.play(discord.PCMVolumeTransformer(raw_source, volume=1.0))
 
         @stream_group.command(name="stop", description="Stops the active feed and leaves the voice channel.")
         async def stop_stream(interaction: discord.Interaction):
@@ -52,10 +53,25 @@ class StreamBot(discord.Client):
             else:
                 await interaction.response.send_message("I am not currently connected to a voice channel.", ephemeral=True)
 
-        # 3. Add the fully populated group to the main command tree
-        self.tree.add_command(stream_group)
+        @stream_group.command(name="volume", description="Adjusts the volume of the audio feed on the fly.")
+        @app_commands.describe(percentage="The target volume percentage from 0 to 100.")
+        async def adjust_volume(interaction: discord.Interaction, percentage: app_commands.Range[int, 0, 100]):
+            vc = interaction.guild.voice_client
+            
+            if not vc or not vc.source:
+                await interaction.response.send_message("The bot is not currently streaming!", ephemeral=True)
+                return
 
-        # 4. Sync commands globally with Discord's servers
+            # Check if the current source is a volume transformer object
+            if isinstance(vc.source, discord.PCMVolumeTransformer):
+                # Convert the integer entry (0-100) to a float multiplier (0.0-1.0)
+                vc.source.volume = percentage / 100.0
+                await interaction.response.send_message(f"🎵 Volume set to **{percentage}%**.")
+            else:
+                await interaction.response.send_message("Volume control wrapper not ready on this stream layout.", ephemeral=True)
+
+        # Add the populated group to the main command tree and sync globally
+        self.tree.add_command(stream_group)
         print("Syncing slash commands globally...")
         await self.tree.sync()
 
