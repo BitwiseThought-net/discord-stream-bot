@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 
 # Exit immediately if a command exits with a non-zero status
 set -e
@@ -61,7 +61,7 @@ case "$OS_ID" in
             PKG_MANAGER="manual"
         fi
         ;;
-case
+esac
 
 # Run update sequence if package manager detected
 if [ "$PKG_MANAGER" != "manual" ]; then
