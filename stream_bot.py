@@ -16,8 +16,9 @@ class StreamBot(discord.Client):
     def __init__(self, *, intents: discord.Intents):
         super().__init__(intents=intents)
         self.tree = app_commands.CommandTree(self)
-        # Tracking active sleep timer tasks so we can cancel them if stopped manually
+        # Tracking active sleep and wake timer tasks per server guild
         self.sleep_tasks = {}
+        self.wake_tasks = {}
 
     async def setup_hook(self):
         print(f"Creating dynamic slash command group: /{COMMAND_NAME}")
@@ -51,6 +52,7 @@ class StreamBot(discord.Client):
         @stream_group.command(name="stop", description="Stops the active feed and leaves the voice channel.")
         async def stop_stream(interaction: discord.Interaction):
             guild_id = interaction.guild.id
+            
             # Cancel any pending sleep timer for this server if it exists
             if guild_id in self.sleep_tasks:
                 self.sleep_tasks[guild_id].cancel()
@@ -87,12 +89,9 @@ class StreamBot(discord.Client):
                 await interaction.response.send_message("The bot must be connected to a voice channel to set a sleep timer!", ephemeral=True)
                 return
 
-            # Clean and parse the input target string
             raw_input = duration.lower().strip()
             delay_seconds = None
 
-            # 1. Match Relative Duration Formats (e.g., '3s', '15minutes', '1.5h')
-            # Extracts floating point numerical components and matches character flags
             relative_match = re.match(r"^([0-9.]+)\s*([a-z]+)$", raw_input)
             
             if relative_match:
@@ -108,8 +107,6 @@ class StreamBot(discord.Client):
                 else:
                     await interaction.response.send_message("⚠️ Unrecognized duration unit. Please use seconds, minutes, or hours.", ephemeral=True)
                     return
-
-            # 2. Match Absolute Dynamic Time Formats (e.g., '3:34pm', '15:20')
             else:
                 time_formats = ["%I:%M%p", "%I:%M %p", "%H:%M"]
                 now = datetime.now()
@@ -117,13 +114,9 @@ class StreamBot(discord.Client):
                 for fmt in time_formats:
                     try:
                         parsed_time = datetime.strptime(raw_input.upper(), fmt)
-                        # Construct a timestamp using today's calendar date
                         target_dt = now.replace(hour=parsed_time.hour, minute=parsed_time.minute, second=0, microsecond=0)
-                        
-                        # If the absolute time targeted has already passed today, assume it rolls over to tomorrow
                         if target_dt < now:
                             target_dt += timedelta(days=1)
-                            
                         delay_seconds = (target_dt - now).total_seconds()
                         break
                     except ValueError:
@@ -133,11 +126,9 @@ class StreamBot(discord.Client):
                 await interaction.response.send_message("⚠️ Invalid time string format. Try inputs like `30m`, `1.5h`, or `11:45pm`.", ephemeral=True)
                 return
 
-            # Cancel any existing sleep timer task running on this specific server guild
             if guild_id in self.sleep_tasks:
                 self.sleep_tasks[guild_id].cancel()
 
-            # Define the background sleep worker function thread safely
             async def sleep_worker(seconds, voice_client):
                 await asyncio.sleep(seconds)
                 if voice_client and voice_client.is_connected():
@@ -146,20 +137,103 @@ class StreamBot(discord.Client):
                 if guild_id in self.sleep_tasks:
                     del self.sleep_tasks[guild_id]
 
-            # Register and immediately launch the scheduled task thread inside the loop
             task = asyncio.create_task(sleep_worker(delay_seconds, vc))
             self.sleep_tasks[guild_id] = task
 
-            # Calculate user-facing clean presentation strings for confirmation message
             total_minutes = int(delay_seconds // 60)
             remaining_seconds = int(delay_seconds % 60)
-            
-            if total_minutes > 0:
-                time_display = f"{total_minutes}m {remaining_seconds}s"
-            else:
-                time_display = f"{remaining_seconds} seconds"
-
+            time_display = f"{total_minutes}m {remaining_seconds}s" if total_minutes > 0 else f"{remaining_seconds} seconds"
             await interaction.response.send_message(f"💤 Sleep timer locked in! The stream will turn off in **{time_display}**.")
+
+        @stream_group.command(name="wake", description="Sets a wake timer to automatically turn on the stream.")
+        @app_commands.describe(duration="Time string like '7:00am', '10s', '5m', or '1h'.")
+        async def wake_timer(interaction: discord.Interaction, duration: str):
+            guild_id = interaction.guild.id
+            
+            # Ensure the scheduling user is in a voice channel so the bot knows where to wake up
+            if not interaction.user.voice:
+                await interaction.response.send_message("⚠️ You must be inside a voice channel when running this command so the bot knows where to connect!", ephemeral=True)
+                return
+
+            target_channel = interaction.user.voice.channel
+            raw_input = duration.lower().strip()
+            delay_seconds = None
+
+            # Parse Relative Formats
+            relative_match = re.match(r"^([0-9.]+)\s*([a-z]+)$", raw_input)
+            if relative_match:
+                value = float(relative_match.group(1))
+                unit = relative_match.group(2)
+                
+                if unit in ['s', 'sec', 'second', 'seconds']:
+                    delay_seconds = value
+                elif unit in ['m', 'min', 'minute', 'minutes']:
+                    delay_seconds = value * 60
+                elif unit in ['h', 'hr', 'hour', 'hours']:
+                    delay_seconds = value * 3600
+                else:
+                    await interaction.response.send_message("⚠️ Unrecognized wake duration unit. Use seconds, minutes, or hours.", ephemeral=True)
+                    return
+            # Parse Absolute Time Formats
+            else:
+                time_formats = ["%I:%M%p", "%I:%M %p", "%H:%M"]
+                now = datetime.now()
+                
+                for fmt in time_formats:
+                    try:
+                        parsed_time = datetime.strptime(raw_input.upper(), fmt)
+                        target_dt = now.replace(hour=parsed_time.hour, minute=parsed_time.minute, second=0, microsecond=0)
+                        if target_dt < now:
+                            target_dt += timedelta(days=1)
+                        delay_seconds = (target_dt - now).total_seconds()
+                        break
+                    except ValueError:
+                        continue
+
+            if delay_seconds is None or delay_seconds <= 0:
+                await interaction.response.send_message("⚠️ Invalid wake time format. Try inputs like `10m`, `1h`, or `7:30am`.", ephemeral=True)
+                return
+
+            # Cancel any pending wake timer task running on this server guild
+            if guild_id in self.wake_tasks:
+                self.wake_tasks[guild_id].cancel()
+
+            # Define background wake worker execution block
+            async def wake_worker(seconds, channel_target):
+                await asyncio.sleep(seconds)
+                
+                # Check if the bot is already streaming somewhere in the guild
+                if interaction.guild.voice_client:
+                    if interaction.guild.voice_client.is_connected():
+                        await interaction.guild.voice_client.disconnect()
+                
+                try:
+                    vc = await channel_target.connect()
+                    input_device, detected_channels = discover_hardware_profile()
+                    
+                    ffmpeg_options = {
+                        'before_options': f'-nostdin -f alsa -ac {detected_channels} -ar 44100',
+                        'options': ''
+                    }
+                    
+                    raw_source = discord.FFmpegPCMAudio(input_device, **ffmpeg_options)
+                    vc.play(discord.PCMVolumeTransformer(raw_source, volume=1.0))
+                    print(f"⏰ Wake timer reached! Automatically streaming to channel: {channel_target.name}")
+                except Exception as e:
+                    print(f"❌ Wake timer worker failed to connect/stream: {e}")
+
+                if guild_id in self.wake_tasks:
+                    del self.wake_tasks[guild_id]
+
+            # Fire off the async task into the background execution loop
+            task = asyncio.create_task(wake_worker(delay_seconds, target_channel))
+            self.wake_tasks[guild_id] = task
+
+            total_minutes = int(delay_seconds // 60)
+            remaining_seconds = int(delay_seconds % 60)
+            time_display = f"{total_minutes}m {remaining_seconds}s" if total_minutes > 0 else f"{remaining_seconds} seconds"
+            
+            await interaction.response.send_message(f"⏰ Wake timer locked in! The bot will automatically join **{target_channel.name}** and start streaming in **{time_display}**.")
 
         self.tree.add_command(stream_group)
         print("Syncing slash commands globally...")
