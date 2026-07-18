@@ -12,8 +12,8 @@ RUN apt-get update && apt-get install -y \
 
 WORKDIR /app
 
-# Install Python requirements including the newly required davey protocol module
-RUN pip install --no-cache-dir discord.py PyNaCl davey
+# Install Python requirements including testing and protocol components
+RUN pip install --no-cache-dir discord.py PyNaCl davey pytest
 
 # Copy the bot script into the container
 COPY stream_bot.py .
