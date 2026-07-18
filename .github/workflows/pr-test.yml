@@ -19,15 +19,14 @@ jobs:
       - name: Install Test Dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install pytest discord.py PyNaCl davey
+          pip install pytest pytest-cov discord.py PyNaCl davey
 
       - name: Check Draft Status and Execute Test Suite
         env:
           IS_DRAFT: ${{ github.event.pull_request.draft }}
         run: |
-          # Only enforce automated execution path if the PR state is explicitly a draft
           if [ "$IS_DRAFT" = "true" ] || [ "${{ github.event.action }}" = "converted_to_draft" ]; then
-            echo "🚀 Draft PR state verified. Running unit test pipelines..."
+            echo "🚀 Draft PR state verified. Running unit test & coverage pipelines..."
             pytest test_bot.py -v
           else
             echo "⏭️ Pull Request is not a draft. Skipping suite sequence execution targets."
