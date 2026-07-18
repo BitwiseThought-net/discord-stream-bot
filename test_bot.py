@@ -35,10 +35,15 @@ import stream_bot
 class TestDiscordStreamBotFullCoverage(unittest.IsolatedAsyncioTestCase):
 
     async def asyncSetUp(self):
-        """Runs before every test to execute setup_hook and extract hidden functions."""
+        """Runs before every test to link variables and extract hidden functions."""
         self.intents = discord.Intents.default()
         self.bot = stream_bot.StreamBot(intents=self.intents)
         stream_bot.STATE_FILE = "/data/state.json"
+        
+        # FIXED: Explicitly force the module-level bot to be our active test bot instance
+        stream_bot.bot = self.bot
+        self.bot.sleep_tasks = {}
+        self.bot.wake_tasks = {}
         
         # Intercept Group creation during setup_hook to extract local functions
         with patch('discord.app_commands.Group', InterceptorGroup), \
@@ -84,7 +89,6 @@ class TestDiscordStreamBotFullCoverage(unittest.IsolatedAsyncioTestCase):
                 stream_bot.clear_stream_state()
             except Exception as e:
                 self.fail(f"clear_stream_state raised an unhandled exception: {e}")
-
     # =========================================================================
     # 2. AUTOMATED HARDWARE DISCOVERY PATHWAY TESTS
     # =========================================================================
@@ -127,7 +131,6 @@ class TestDiscordStreamBotFullCoverage(unittest.IsolatedAsyncioTestCase):
             dev, ch = stream_bot.discover_hardware_profile()
             self.assertEqual(dev, 'plughw:1,0')
             self.assertEqual(ch, '2')
-
     # =========================================================================
     # 3. INTERACTION INTERFACE / SUBCOMMAND APPLICATION SLICES
     # =========================================================================
@@ -193,12 +196,10 @@ class TestDiscordStreamBotFullCoverage(unittest.IsolatedAsyncioTestCase):
         self.bot.sleep_tasks = {999: mock_task}
         
         with patch('stream_bot.clear_stream_state') as mock_clear:
-            # Inject our active self context by mocking how bound methods run inside classes
-            with patch.dict(stream_bot.__dict__, {'self': self.bot}):
-                # Force Python execution scope to evaluate using our running bot tracker properties
-                await CAPTURED_SUBCOMMANDS['stop'](interaction)
-                mock_clear.assert_called_once()
-                vc.disconnect.assert_called_once()
+            await CAPTURED_SUBCOMMANDS['stop'](interaction)
+            mock_task.cancel.assert_called_once()
+            mock_clear.assert_called_once()
+            vc.disconnect.assert_called_once()
 
     async def test_subcommand_stop_inactive(self):
         """Ensures safe execution returns if stop is called while client is completely idle."""
@@ -207,7 +208,6 @@ class TestDiscordStreamBotFullCoverage(unittest.IsolatedAsyncioTestCase):
         interaction.response.send_message.assert_called_once_with(
             "I am not currently connected to a voice channel.", ephemeral=True
         )
-
     async def test_subcommand_volume_not_streaming(self):
         """Validates baseline locks if volume manipulation is issued when stream is dark."""
         interaction, _ = self._create_mock_interaction(streaming=False)
@@ -262,12 +262,11 @@ class TestDiscordStreamBotFullCoverage(unittest.IsolatedAsyncioTestCase):
         """Traces complete sleep scheduling, previous task overrides, and worker processing."""
         interaction, vc = self._create_mock_interaction(streaming=True)
         mock_old_task = MagicMock()
+        self.bot.sleep_tasks = {999: mock_old_task}
         
         with patch('asyncio.sleep', AsyncMock()) as mock_async_sleep, \
-             patch('stream_bot.clear_stream_state') as mock_clear, \
-             patch.object(stream_bot, 'bot', self.bot):
+             patch('stream_bot.clear_stream_state') as mock_clear:
             
-            self.bot.sleep_tasks = {999: mock_old_task}
             await CAPTURED_SUBCOMMANDS['sleep'](interaction, duration="2s")
             mock_old_task.cancel.assert_called_once()
             
@@ -284,15 +283,13 @@ class TestDiscordStreamBotFullCoverage(unittest.IsolatedAsyncioTestCase):
         
         frozen_now = datetime.now().replace(hour=12, minute=0, second=0, microsecond=0)
         with patch('stream_bot.datetime') as mock_dt, \
-             patch('asyncio.create_task'), \
-             patch.object(stream_bot, 'bot', self.bot):
+             patch('asyncio.create_task'):
                  
             mock_dt.now.return_value = frozen_now
             mock_dt.strptime.return_value = datetime.strptime("11:00AM", "%I:%M%p")
             
             await CAPTURED_SUBCOMMANDS['sleep'](interaction, duration="11:00am")
             mock_dt.now.assert_called()
-
     async def test_subcommand_wake_not_in_voice(self):
         """Validates wake targeting blocking configurations if tracking target is out of voice."""
         interaction, _ = self._create_mock_interaction(in_voice=False)
@@ -321,15 +318,14 @@ class TestDiscordStreamBotFullCoverage(unittest.IsolatedAsyncioTestCase):
         """Traces wake loops, ensures pre-existing channels clear, and saves recovery states."""
         interaction, vc = self._create_mock_interaction(in_voice=True, streaming=True)
         mock_old_wake = MagicMock()
+        self.bot.wake_tasks = {999: mock_old_wake}
 
         with patch('asyncio.sleep', AsyncMock()), \
              patch('stream_bot.discover_hardware_profile', return_value=('plughw:1,0', '2')), \
              patch('stream_bot.save_stream_state') as mock_save, \
              patch('discord.FFmpegPCMAudio'), \
-             patch('discord.PCMVolumeTransformer'), \
-             patch.object(stream_bot, 'bot', self.bot):
+             patch('discord.PCMVolumeTransformer'):
             
-            self.bot.wake_tasks = {999: mock_old_wake}
             await CAPTURED_SUBCOMMANDS['wake'](interaction, duration="1s")
             mock_old_wake.cancel.assert_called_once()
             
@@ -345,14 +341,13 @@ class TestDiscordStreamBotFullCoverage(unittest.IsolatedAsyncioTestCase):
         target_channel = interaction.user.voice.channel
         target_channel.connect = AsyncMock(side_effect=Exception("Connection Crash Exception"))
 
-        with patch('asyncio.sleep', AsyncMock()), patch.object(stream_bot, 'bot', self.bot):
+        with patch('asyncio.sleep', AsyncMock()):
             await CAPTURED_SUBCOMMANDS['wake'](interaction, duration="1s")
             worker = self.bot.wake_tasks[999]
             try:
                 await worker
             except Exception as e:
                 self.fail(f"Wake worker leaked a nested asynchronous crash line: {e}")
-
     # =========================================================================
     # 5. OS ENGINE/ EVENT RECOVERY AGENT HANDLER TESTS
     # =========================================================================
