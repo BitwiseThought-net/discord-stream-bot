@@ -7,7 +7,7 @@ import unittest
 from unittest.mock import patch, mock_open, MagicMock, AsyncMock
 from datetime import datetime, timedelta
 
-# Lock fake environment variables securely before stream_bot imports
+# Lock environment profiles before stream_bot executes its import sequence
 os.environ['DISCORD_TOKEN'] = 'mock_valid_token_xyz'
 os.environ['COMMAND_BASE'] = 'radio'
 os.environ['RECOVERY_MODE'] = 'resume'
@@ -104,7 +104,6 @@ class TestDiscordStreamBotFullCoverage(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(dev, 'plughw:1,0')
             self.assertEqual(ch, '2')
 
-
     # =========================================================================
     # 3. INTERACTION INTERFACE / SUBCOMMAND APPLICATION SLICES
     # =========================================================================
@@ -142,11 +141,12 @@ class TestDiscordStreamBotFullCoverage(unittest.IsolatedAsyncioTestCase):
         return interaction, vc
 
     async def _get_subcommands(self):
-        """Helper to safely isolate inner dynamic subcommand function pointers."""
+        """FIXED: Safely drills through the tree to pull inner subcommand pointers."""
         await self.bot.setup_hook()
-        # Extract command tree objects manually from the synced group list
-        cmd_group = self.bot.tree.get_commands()[0]
-        return {cmd.name: cmd for cmd in cmd_group.commands}
+        # Correctly pull the group object first using the name defined in your environment
+        root_group = self.bot.tree.get_command(stream_bot.COMMAND_NAME)
+        # Safely list all attached subcommands mapping name keys to function pointers
+        return {sub_cmd.name: sub_cmd for sub_cmd in root_group.commands}
 
     async def test_subcommand_start_not_in_voice(self):
         """Validates immediate block parameters if requesting user is out of voice."""
@@ -177,7 +177,7 @@ class TestDiscordStreamBotFullCoverage(unittest.IsolatedAsyncioTestCase):
         interaction, vc = self._create_mock_interaction(streaming=True)
         
         mock_task = MagicMock()
-        self.bot.sleep_tasks[999] = mock_task
+        self.bot.sleep_tasks = {999: mock_task} # Map the active task to our mock server ID
         
         with patch('stream_bot.clear_stream_state') as mock_clear:
             await cmds['stop']._callback(interaction)
@@ -193,7 +193,6 @@ class TestDiscordStreamBotFullCoverage(unittest.IsolatedAsyncioTestCase):
         interaction.response.send_message.assert_called_once_with(
             "I am not currently connected to a voice channel.", ephemeral=True
         )
-
 
     async def test_subcommand_volume_not_streaming(self):
         """Validates baseline locks if volume manipulation is issued when stream is dark."""
@@ -257,7 +256,7 @@ class TestDiscordStreamBotFullCoverage(unittest.IsolatedAsyncioTestCase):
         interaction, vc = self._create_mock_interaction(streaming=True)
         
         mock_old_task = MagicMock()
-        self.bot.sleep_tasks[999] = mock_old_task
+        self.bot.sleep_tasks = {999: mock_old_task}
         
         with patch('asyncio.sleep', AsyncMock()) as mock_async_sleep, \
              patch('stream_bot.clear_stream_state') as mock_clear:
@@ -284,7 +283,6 @@ class TestDiscordStreamBotFullCoverage(unittest.IsolatedAsyncioTestCase):
             
             await cmds['sleep']._callback(interaction, duration="11:00am")
             mock_dt.now.assert_called()
-
 
     async def test_subcommand_wake_not_in_voice(self):
         """Validates wake targeting blocking configurations if tracking target is out of voice."""
@@ -319,7 +317,7 @@ class TestDiscordStreamBotFullCoverage(unittest.IsolatedAsyncioTestCase):
         interaction, vc = self._create_mock_interaction(in_voice=True, streaming=True)
         
         mock_old_wake = MagicMock()
-        self.bot.wake_tasks[999] = mock_old_wake
+        self.bot.wake_tasks = {999: mock_old_wake}
 
         with patch('asyncio.sleep', AsyncMock()), \
              patch('stream_bot.discover_hardware_profile', return_value=('plughw:1,0', '2')), \
@@ -350,7 +348,6 @@ class TestDiscordStreamBotFullCoverage(unittest.IsolatedAsyncioTestCase):
                 await worker
             except Exception as e:
                 self.fail(f"Wake worker leaked a nested asynchronous crash line: {e}")
-
 
     # =========================================================================
     # 5. OS ENGINE/ EVENT RECOVERY AGENT HANDLER TESTS
