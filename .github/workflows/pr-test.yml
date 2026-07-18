@@ -1,8 +1,8 @@
-name: Draft PR Verification Test Suite
+name: PR Verification Test Suite
 
 on:
   pull_request:
-    types: [opened, synchronize, reopened, converted_to_draft]
+    types: [opened, synchronize, reopened]
 
 # Permissions required to let the workflow write check summaries and comment on the PR
 permissions:
@@ -28,22 +28,16 @@ jobs:
           python -m pip install --upgrade pip
           pip install pytest pytest-cov discord.py PyNaCl davey
 
-      - name: Check Draft Status and Execute Test Suite
-        env:
-          IS_DRAFT: ${{ github.event.pull_request.draft }}
+      - name: Execute Test Suite
         run: |
-          if [ "$IS_DRAFT" = "true" ] || [ "${{ github.event.action }}" = "converted_to_draft" ]; then
-            echo "🚀 Draft PR state verified. Running unit test & coverage pipelines..."
-            # Executes pytest and generates the junit.xml and coverage.xml files
-            pytest test_bot.py -v
-          else
-            echo "⏭️ Pull Request is not a draft. Skipping suite sequence execution targets."
-          fi
+          echo "🚀 Running unit test & coverage pipelines..."
+          # Executes pytest and generates the junit.xml and coverage.xml files
+          pytest test_bot.py -v
 
       # 1. Surface individual test results natively in a new "Checks" tab on the PR
       - name: Publish Unit Test Results Check Tab
         uses: dorny/test-reporter@v1
-        if: (github.event.pull_request.draft == true || github.event.action == 'converted_to_draft') && (success() || failure())
+        if: success() || failure()
         with:
           name: Pytest Unit Test Specifications
           path: junit.xml
@@ -52,7 +46,7 @@ jobs:
       # 2. Extract code coverage percentages and write a summary comment on the PR file changes list
       - name: Publish Code Coverage Markdown Summary
         uses: 5monkeys/cobertura-action@master
-        if: (github.event.pull_request.draft == true || github.event.action == 'converted_to_draft') && (success() || failure())
+        if: success() || failure()
         with:
           path: coverage.xml
           repo_token: ${{ secrets.GITHUB_TOKEN }}
