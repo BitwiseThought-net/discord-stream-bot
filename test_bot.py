@@ -6,6 +6,11 @@ import unittest
 from unittest.mock import patch, mock_open, MagicMock, AsyncMock
 from datetime import datetime, timedelta
 
+# FORCED PATH CORRECTION: Ensure local workspace takes absolute priority
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+if BASE_DIR not in sys.path:
+    sys.path.insert(0, BASE_DIR)
+
 # Inject required environment stubs before module evaluation
 os.environ['DISCORD_TOKEN'] = 'mock_valid_token_xyz'
 os.environ['COMMAND_BASE'] = 'radio'
@@ -137,7 +142,7 @@ class TestDiscordStreamBotFullCoverage(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(ch, '2')
 
     # =========================================================================
-    # BROADCAST CORE SUBCOMMAND EXECUTIONS (DIRECT TESTING NAMESPACES)
+    # BROADCAST CORE SUBCOMMAND EXECUTIONS
     # =========================================================================
 
     async def test_subcommand_start_not_in_voice(self):
@@ -200,7 +205,7 @@ class TestDiscordStreamBotFullCoverage(unittest.IsolatedAsyncioTestCase):
         await stream_bot.volume(interaction, percentage=80)
         self.assertEqual(vc.source.volume, 0.8)
     # =========================================================================
-    # TIMED MATRIX OPERATIONS (SLEEP / WAKE MATRIX ENGINE)
+    # TIMED MATRIX OPERATIONS
     # =========================================================================
 
     async def test_subcommand_sleep_disconnected(self):
