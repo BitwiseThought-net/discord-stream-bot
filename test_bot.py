@@ -6,12 +6,12 @@ import unittest
 from unittest.mock import patch, mock_open, MagicMock, AsyncMock
 from datetime import datetime, timedelta
 
-# FORCED PATH CORRECTION: Ensure local workspace takes absolute priority
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-if BASE_DIR not in sys.path:
-    sys.path.insert(0, BASE_DIR)
+# Lock down the absolute local path before doing anything else
+LOCAL_PATH = os.path.dirname(os.path.abspath(__file__))
+if LOCAL_PATH not in sys.path:
+    sys.path.insert(0, LOCAL_PATH)
 
-# Inject required environment stubs before module evaluation
+# Stub critical environment parameters required at module load time
 os.environ['DISCORD_TOKEN'] = 'mock_valid_token_xyz'
 os.environ['COMMAND_BASE'] = 'radio'
 os.environ['RECOVERY_MODE'] = 'resume'
@@ -22,7 +22,7 @@ import stream_bot
 class TestDiscordStreamBotFullCoverage(unittest.IsolatedAsyncioTestCase):
 
     async def asyncSetUp(self):
-        """Prepares a pure, mocked bot state environment prior to executing tests."""
+        """Re-initializes bot tracking dictionaries before every test block runs."""
         self.bot = stream_bot.bot
         self.bot.sleep_tasks = {}
         self.bot.wake_tasks = {}
@@ -61,7 +61,7 @@ class TestDiscordStreamBotFullCoverage(unittest.IsolatedAsyncioTestCase):
         return interaction, vc
 
     # =========================================================================
-    # CORE UTILITY & COMPONENT FUNCTION MODULE TESTING
+    # CONFIGURATION & FILE ENGINE UTILITY TESTS
     # =========================================================================
 
     def test_environment_configurations(self):
@@ -99,7 +99,7 @@ class TestDiscordStreamBotFullCoverage(unittest.IsolatedAsyncioTestCase):
             except Exception as e:
                 self.fail(f"clear_stream_state raised an unhandled exception: {e}")
     # =========================================================================
-    # AUDIO HARDWARE LOGIC PROFILES
+    # ALSA SOUND CARD HARDWARE DETECTION CHECKS
     # =========================================================================
 
     def test_hardware_discovery_missing_base_dir(self):
@@ -142,7 +142,7 @@ class TestDiscordStreamBotFullCoverage(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(ch, '2')
 
     # =========================================================================
-    # BROADCAST CORE SUBCOMMAND EXECUTIONS
+    # CORE BROADCAST CONTROL SUBCOMMAND PATHS
     # =========================================================================
 
     async def test_subcommand_start_not_in_voice(self):
@@ -283,7 +283,7 @@ class TestDiscordStreamBotFullCoverage(unittest.IsolatedAsyncioTestCase):
                 self.assertIn(999, self.bot.wake_tasks)
 
     # =========================================================================
-    # SYSTEM ENGINE / RECOVERY SUBSTATIONS
+    # HARD ENGINE STATE RECOVERY LIFECYCLES
     # =========================================================================
 
     @patch('stream_bot.discover_hardware_profile', return_value=('plughw:1,0', '2'))
