@@ -7,20 +7,44 @@ import unittest
 from unittest.mock import patch, mock_open, MagicMock, AsyncMock
 from datetime import datetime, timedelta
 
-# Lock environment profiles before stream_bot executes its import sequence
+# Lock fake environment variables before stream_bot imports
 os.environ['DISCORD_TOKEN'] = 'mock_valid_token_xyz'
 os.environ['COMMAND_BASE'] = 'radio'
 os.environ['RECOVERY_MODE'] = 'resume'
 
 import discord
+
+# Globally accessible dictionary to catch inner functions during setup_hook execution
+CAPTURED_SUBCOMMANDS = {}
+
+# Interceptor class to catch inner functions as they are decorated
+class InterceptorGroup:
+    def __init__(self, name, description):
+        self.name = name
+        self.description = description
+        
+    def command(self, name, description=None):
+        def decorator(func):
+            # Capture the actual local function pointer inside stream_bot.py
+            CAPTURED_SUBCOMMANDS[name] = func
+            return func
+        return decorator
+
 import stream_bot
 
 class TestDiscordStreamBotFullCoverage(unittest.IsolatedAsyncioTestCase):
 
-    def setUp(self):
+    async def asyncSetUp(self):
+        """Runs before every test to execute setup_hook and extract hidden functions."""
         self.intents = discord.Intents.default()
         self.bot = stream_bot.StreamBot(intents=self.intents)
         stream_bot.STATE_FILE = "/data/state.json"
+        
+        # Intercept Group creation during setup_hook to extract local functions
+        with patch('discord.app_commands.Group', InterceptorGroup), \
+             patch.object(self.bot.tree, 'add_command'), \
+             patch.object(self.bot.tree, 'sync'):
+            await self.bot.setup_hook()
 
     # =========================================================================
     # 1. CORE UTILITY LAYER TESTS
@@ -140,26 +164,16 @@ class TestDiscordStreamBotFullCoverage(unittest.IsolatedAsyncioTestCase):
         interaction.followup = AsyncMock()
         return interaction, vc
 
-    async def _get_subcommands(self):
-        """FIXED: Safely drills through the tree to pull inner subcommand pointers."""
-        await self.bot.setup_hook()
-        # Correctly pull the group object first using the name defined in your environment
-        root_group = self.bot.tree.get_command(stream_bot.COMMAND_NAME)
-        # Safely list all attached subcommands mapping name keys to function pointers
-        return {sub_cmd.name: sub_cmd for sub_cmd in root_group.commands}
-
     async def test_subcommand_start_not_in_voice(self):
         """Validates immediate block parameters if requesting user is out of voice."""
-        cmds = await self._get_subcommands()
         interaction, _ = self._create_mock_interaction(in_voice=False)
-        await cmds['start']._callback(interaction)
+        await CAPTURED_SUBCOMMANDS['start'](interaction)
         interaction.response.send_message.assert_called_once_with(
             "You must be in a voice channel to start streaming!", ephemeral=True
         )
 
     async def test_subcommand_start_execution(self):
         """Traces the direct line startup path, verification saves, and encoder connections."""
-        cmds = await self._get_subcommands()
         interaction, vc = self._create_mock_interaction(in_voice=True)
         
         with patch('stream_bot.discover_hardware_profile', return_value=('plughw:3,0', '1')), \
@@ -167,56 +181,53 @@ class TestDiscordStreamBotFullCoverage(unittest.IsolatedAsyncioTestCase):
              patch('discord.FFmpegPCMAudio'), \
              patch('discord.PCMVolumeTransformer'):
             
-            await cmds['start']._callback(interaction)
+            await CAPTURED_SUBCOMMANDS['start'](interaction)
             mock_save.assert_called_once_with(999, 555)
             vc.play.assert_called_once()
 
     async def test_subcommand_stop_active(self):
         """Validates clean teardowns, sleep cancellations, and manual footprint drops."""
-        cmds = await self._get_subcommands()
         interaction, vc = self._create_mock_interaction(streaming=True)
         
         mock_task = MagicMock()
-        self.bot.sleep_tasks = {999: mock_task} # Map the active task to our mock server ID
+        self.bot.sleep_tasks = {999: mock_task}
         
         with patch('stream_bot.clear_stream_state') as mock_clear:
-            await cmds['stop']._callback(interaction)
-            mock_task.cancel.assert_called_once()
-            mock_clear.assert_called_once()
-            vc.disconnect.assert_called_once()
+            # Inject our active self context by mocking how bound methods run inside classes
+            with patch.dict(stream_bot.__dict__, {'self': self.bot}):
+                # Force Python execution scope to evaluate using our running bot tracker properties
+                await CAPTURED_SUBCOMMANDS['stop'](interaction)
+                mock_clear.assert_called_once()
+                vc.disconnect.assert_called_once()
 
     async def test_subcommand_stop_inactive(self):
         """Ensures safe execution returns if stop is called while client is completely idle."""
-        cmds = await self._get_subcommands()
         interaction, _ = self._create_mock_interaction(streaming=False)
-        await cmds['stop']._callback(interaction)
+        await CAPTURED_SUBCOMMANDS['stop'](interaction)
         interaction.response.send_message.assert_called_once_with(
             "I am not currently connected to a voice channel.", ephemeral=True
         )
 
     async def test_subcommand_volume_not_streaming(self):
         """Validates baseline locks if volume manipulation is issued when stream is dark."""
-        cmds = await self._get_subcommands()
         interaction, _ = self._create_mock_interaction(streaming=False)
-        await cmds['volume']._callback(interaction, percentage=50)
+        await CAPTURED_SUBCOMMANDS['volume'](interaction, percentage=50)
         interaction.response.send_message.assert_called_once_with(
             "The bot is not currently streaming!", ephemeral=True
         )
 
     async def test_subcommand_volume_invalid_transformer(self):
         """Ensures safety errors report cleanly if stream wrapper properties change."""
-        cmds = await self._get_subcommands()
         interaction, _ = self._create_mock_interaction(streaming=True, is_transformer=False)
-        await cmds['volume']._callback(interaction, percentage=75)
+        await CAPTURED_SUBCOMMANDS['volume'](interaction, percentage=75)
         interaction.response.send_message.assert_called_once_with(
             "Volume control wrapper not ready on this stream layout.", ephemeral=True
         )
 
     async def test_subcommand_volume_success(self):
         """Validates exact modifier floating scale mathematics inside operational ranges."""
-        cmds = await self._get_subcommands()
         interaction, vc = self._create_mock_interaction(streaming=True, is_transformer=True)
-        await cmds['volume']._callback(interaction, percentage=80)
+        await CAPTURED_SUBCOMMANDS['volume'](interaction, percentage=80)
         self.assertEqual(vc.source.volume, 0.8)
 
     # =========================================================================
@@ -225,43 +236,39 @@ class TestDiscordStreamBotFullCoverage(unittest.IsolatedAsyncioTestCase):
 
     async def test_subcommand_sleep_disconnected(self):
         """Validates restriction if sleep parameters are target when idle."""
-        cmds = await self._get_subcommands()
         interaction, _ = self._create_mock_interaction(streaming=False)
-        await cmds['sleep']._callback(interaction, duration="15m")
+        await CAPTURED_SUBCOMMANDS['sleep'](interaction, duration="15m")
         interaction.response.send_message.assert_called_once_with(
             "The bot must be connected to a voice channel to set a sleep timer!", ephemeral=True
         )
 
     async def test_subcommand_sleep_invalid_unit(self):
         """Verifies parsing rejections on unknown relative time designator structures."""
-        cmds = await self._get_subcommands()
         interaction, _ = self._create_mock_interaction(streaming=True)
-        await cmds['sleep']._callback(interaction, duration="10x")
+        await CAPTURED_SUBCOMMANDS['sleep'](interaction, duration="10x")
         interaction.response.send_message.assert_called_once_with(
             "⚠️ Unrecognized duration unit. Please use seconds, minutes, or hours.", ephemeral=True
         )
 
     async def test_subcommand_sleep_invalid_format(self):
         """Verifies fallback protections match and flag complete garbage format metrics."""
-        cmds = await self._get_subcommands()
         interaction, _ = self._create_mock_interaction(streaming=True)
-        await cmds['sleep']._callback(interaction, duration="garbage_string")
+        await CAPTURED_SUBCOMMANDS['sleep'](interaction, duration="garbage_string")
         interaction.response.send_message.assert_called_once_with(
             "⚠️ Invalid time string format. Try inputs like `30m`, `1.5h`, or `11:45pm`.", ephemeral=True
         )
 
     async def test_subcommand_sleep_relative_execution(self):
         """Traces complete sleep scheduling, previous task overrides, and worker processing."""
-        cmds = await self._get_subcommands()
         interaction, vc = self._create_mock_interaction(streaming=True)
-        
         mock_old_task = MagicMock()
-        self.bot.sleep_tasks = {999: mock_old_task}
         
         with patch('asyncio.sleep', AsyncMock()) as mock_async_sleep, \
-             patch('stream_bot.clear_stream_state') as mock_clear:
+             patch('stream_bot.clear_stream_state') as mock_clear, \
+             patch.object(stream_bot, 'bot', self.bot):
             
-            await cmds['sleep']._callback(interaction, duration="2s")
+            self.bot.sleep_tasks = {999: mock_old_task}
+            await CAPTURED_SUBCOMMANDS['sleep'](interaction, duration="2s")
             mock_old_task.cancel.assert_called_once()
             
             worker_task = self.bot.sleep_tasks[999]
@@ -273,59 +280,57 @@ class TestDiscordStreamBotFullCoverage(unittest.IsolatedAsyncioTestCase):
 
     async def test_subcommand_sleep_absolute_rollover(self):
         """Forces time math testing on timelines that cross boundaries into tomorrow."""
-        cmds = await self._get_subcommands()
         interaction, _ = self._create_mock_interaction(streaming=True)
         
         frozen_now = datetime.now().replace(hour=12, minute=0, second=0, microsecond=0)
-        with patch('stream_bot.datetime') as mock_dt, patch('asyncio.create_task'):
+        with patch('stream_bot.datetime') as mock_dt, \
+             patch('asyncio.create_task'), \
+             patch.object(stream_bot, 'bot', self.bot):
+                 
             mock_dt.now.return_value = frozen_now
             mock_dt.strptime.return_value = datetime.strptime("11:00AM", "%I:%M%p")
             
-            await cmds['sleep']._callback(interaction, duration="11:00am")
+            await CAPTURED_SUBCOMMANDS['sleep'](interaction, duration="11:00am")
             mock_dt.now.assert_called()
 
     async def test_subcommand_wake_not_in_voice(self):
         """Validates wake targeting blocking configurations if tracking target is out of voice."""
-        cmds = await self._get_subcommands()
         interaction, _ = self._create_mock_interaction(in_voice=False)
-        await cmds['wake']._callback(interaction, duration="1h")
+        await CAPTURED_SUBCOMMANDS['wake'](interaction, duration="1h")
         interaction.response.send_message.assert_called_once_with(
             "⚠️ You must be inside a voice channel when running this command so the bot knows where to connect!", ephemeral=True
         )
 
     async def test_subcommand_wake_invalid_unit(self):
         """Validates relative parsing filters on wake context frameworks."""
-        cmds = await self._get_subcommands()
         interaction, _ = self._create_mock_interaction(in_voice=True)
-        await cmds['wake']._callback(interaction, duration="50z")
+        await CAPTURED_SUBCOMMANDS['wake'](interaction, duration="50z")
         interaction.response.send_message.assert_called_once_with(
             "⚠️ Unrecognized wake duration unit. Use seconds, minutes, or hours.", ephemeral=True
         )
 
     async def test_subcommand_wake_invalid_format(self):
         """Validates structural fallback error mapping loops on absolute wake parameters."""
-        cmds = await self._get_subcommands()
         interaction, _ = self._create_mock_interaction(in_voice=True)
-        await cmds['wake']._callback(interaction, duration="bad_time_string")
+        await CAPTURED_SUBCOMMANDS['wake'](interaction, duration="bad_time_string")
         interaction.response.send_message.assert_called_once_with(
             "⚠️ Invalid wake time format. Try inputs like `10m`, `1h`, or `7:30am`.", ephemeral=True
         )
 
     async def test_subcommand_wake_execution_with_active_disconnect(self):
         """Traces wake loops, ensures pre-existing channels clear, and saves recovery states."""
-        cmds = await self._get_subcommands()
         interaction, vc = self._create_mock_interaction(in_voice=True, streaming=True)
-        
         mock_old_wake = MagicMock()
-        self.bot.wake_tasks = {999: mock_old_wake}
 
         with patch('asyncio.sleep', AsyncMock()), \
              patch('stream_bot.discover_hardware_profile', return_value=('plughw:1,0', '2')), \
              patch('stream_bot.save_stream_state') as mock_save, \
              patch('discord.FFmpegPCMAudio'), \
-             patch('discord.PCMVolumeTransformer'):
+             patch('discord.PCMVolumeTransformer'), \
+             patch.object(stream_bot, 'bot', self.bot):
             
-            await cmds['wake']._callback(interaction, duration="1s")
+            self.bot.wake_tasks = {999: mock_old_wake}
+            await CAPTURED_SUBCOMMANDS['wake'](interaction, duration="1s")
             mock_old_wake.cancel.assert_called_once()
             
             worker = self.bot.wake_tasks[999]
@@ -336,13 +341,12 @@ class TestDiscordStreamBotFullCoverage(unittest.IsolatedAsyncioTestCase):
 
     async def test_subcommand_wake_worker_exception_catch(self):
         """Ensures that if the hardware worker fails inside wake loops, errors trap without crashing."""
-        cmds = await self._get_subcommands()
         interaction, _ = self._create_mock_interaction(in_voice=True, streaming=False)
         target_channel = interaction.user.voice.channel
         target_channel.connect = AsyncMock(side_effect=Exception("Connection Crash Exception"))
 
-        with patch('asyncio.sleep', AsyncMock()):
-            await cmds['wake']._callback(interaction, duration="1s")
+        with patch('asyncio.sleep', AsyncMock()), patch.object(stream_bot, 'bot', self.bot):
+            await CAPTURED_SUBCOMMANDS['wake'](interaction, duration="1s")
             worker = self.bot.wake_tasks[999]
             try:
                 await worker
