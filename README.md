@@ -106,4 +106,3 @@ The `RECOVERY_MODE` variable manages how the bot responds when the container eng
 * `/radio volume <0-100>` - Dynamically modifies stream playback amplitude parameters on the fly via a native integer slider inside Discord.
 * `/radio sleep <time>` - Configures a sleep timer to automatically disconnect after a set time. Accepts relative intervals (e.g., `45s`, `15m`, `1.5h`) or absolute timeline positions (e.g., `11:45pm`, `14:30`).
 * `/radio wake <time>` - Configures a wake timer based on the user's active channel position. When the absolute or relative duration value hits zero, the bot automatically wakes up, joins that voice slot, and resumes encoding live audio.
-
