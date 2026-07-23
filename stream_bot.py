@@ -20,6 +20,7 @@ STATE_FILE = "/data/state.json"
 SOURCES_FILE = "/data/sources.json"
 FIFO_PIPE = "/data/audio_pipe"      # Continuous shared audio stream buffer
 CURRENT_TUNED_CHANNEL = "94.9M"
+CURRENT_VOLUME_LEVEL = 1.0          # Global persistent tracking memory register for volume level
 
 if not DISCORD_TOKEN:
     print("❌ Critical Error: DISCORD_TOKEN environment variable is missing.")
@@ -63,11 +64,11 @@ bot = StreamBotClient()
 radio_group = app_commands.Group(name=COMMAND_NAME, description="Audio hardware and SDR streaming matrix controls")
 
 # =========================================================================
-# 2. PERSISTENT LOCAL FILE STATE WRAPPERS (EXPANDED FOR PERSISTENCE)
+# 2. PERSISTENT LOCAL FILE STATE WRAPPERS
 # =========================================================================
 def save_stream_state(guild_id: int, channel_id: int, selected_index: int = 0, is_active: bool = True):
-    """Serializes absolute tracking boundaries and active tuning channels to disk."""
-    global CURRENT_TUNED_CHANNEL
+    """Serializes absolute tracking boundaries, volume multipliers, and frequencies to disk."""
+    global CURRENT_TUNED_CHANNEL, CURRENT_VOLUME_LEVEL
     try:
         os.makedirs(os.path.dirname(STATE_FILE), exist_ok=True)
         payload = {
@@ -75,6 +76,7 @@ def save_stream_state(guild_id: int, channel_id: int, selected_index: int = 0, i
             "channel_id": channel_id,
             "selected_index": selected_index,
             "tuned_frequency": CURRENT_TUNED_CHANNEL,
+            "volume_level": CURRENT_VOLUME_LEVEL,
             "is_active": is_active
         }
         with open(STATE_FILE, 'w') as f:
@@ -228,11 +230,10 @@ def spawn_hardware_capture_stream(active_source):
             bot.ffmpeg_process = subprocess.Popen(ffmpeg_cmd, stdin=bot.sox_process.stdout, stdout=PIPE_WRITE_HANDLE, stderr=subprocess.DEVNULL)
 
 async def execute_stream_pipeline(interaction: discord.Interaction, channel: discord.VoiceChannel, force_index: int = None):
-    """Binds the voice client loop to our continuous filesystem FIFO stream handle, preserving historical values."""
-    global CURRENT_TUNED_CHANNEL
+    """Binds the voice client loop to our continuous filesystem FIFO stream handle, preserving historical data."""
+    global CURRENT_TUNED_CHANNEL, CURRENT_VOLUME_LEVEL
     current_index = 0
     
-    # Load settings out of local profile database index mapping records to secure state persistence
     if os.path.exists(STATE_FILE):
         try:
             with open(STATE_FILE, 'r') as f:
@@ -240,6 +241,8 @@ async def execute_stream_pipeline(interaction: discord.Interaction, channel: dis
             current_index = saved_data.get("selected_index", 0)
             if "tuned_frequency" in saved_data:
                 CURRENT_TUNED_CHANNEL = saved_data["tuned_frequency"]
+            if "volume_level" in saved_data:
+                CURRENT_VOLUME_LEVEL = saved_data["volume_level"]
         except Exception:
             pass
 
@@ -262,20 +265,16 @@ async def execute_stream_pipeline(interaction: discord.Interaction, channel: dis
     try:
         vc = interaction.guild.voice_client or await channel.connect()
 
-        # Spin up or switch the underlying hardware process safely
         spawn_hardware_capture_stream(active_source)
-
-        # Give the background process 400ms to initialize and start feeding bytes into the pipe
         await asyncio.sleep(0.4)
 
-        # Initialize the audio player thread ONLY if it is not currently streaming data
         if not vc.is_playing():
             audio_stream = discord.FFmpegPCMAudio(
                 source=FIFO_PIPE,
                 before_options="-f s16le -ar 48k -ac 2",
                 pipe=False
             )
-            transformer = discord.PCMVolumeTransformer(audio_stream, volume=1.0)
+            transformer = discord.PCMVolumeTransformer(audio_stream, volume=CURRENT_VOLUME_LEVEL)
             vc.play(transformer)
         
         save_stream_state(interaction.guild.id, channel.id, current_index, is_active=True)
@@ -290,7 +289,6 @@ async def start(interaction: discord.Interaction):
         return
 
     await interaction.response.defer(ephemeral=True)
-    # Check if a previously selected index configuration exists, otherwise pass None to retain defaults
     await execute_stream_pipeline(interaction, interaction.user.voice.channel)
 @radio_group.command(name="stop", description="Terminate audio capture channels and disconnect voice maps")
 async def stop(interaction: discord.Interaction):
@@ -312,6 +310,7 @@ async def stop(interaction: discord.Interaction):
 
 @radio_group.command(name="volume", description="Scale the volume parameters of the live stream transformer")
 async def volume(interaction: discord.Interaction, percentage: int):
+    global CURRENT_VOLUME_LEVEL
     vc = interaction.guild.voice_client
     if not vc or not vc.is_connected():
         await interaction.response.send_message("The bot is not currently streaming!", ephemeral=True)
@@ -323,7 +322,17 @@ async def volume(interaction: discord.Interaction, percentage: int):
 
     target_volume = max(0.0, min(float(percentage) / 100.0, 2.0))
     vc.source.volume = target_volume
-    await interaction.response.send_message(f"🔊 Dynamic playback volume adjusted to **{percentage}%**.")
+    CURRENT_VOLUME_LEVEL = target_volume
+    
+    current_index = 0
+    try:
+        if os.path.exists(STATE_FILE):
+            with open(STATE_FILE, 'r') as f:
+                current_index = json.load(f).get("selected_index", 0)
+    except Exception: pass
+    
+    save_stream_state(interaction.guild.id, vc.channel.id, current_index, is_active=True)
+    await interaction.response.send_message(f"🔊 Dynamic playback volume adjusted and saved to **{percentage}%**.")
 
 # =========================================================================
 # 5. DEVICE CATALOG SELECTION & DYNAMIC TUNING COMMANDS
@@ -361,7 +370,6 @@ async def set_input(interaction: discord.Interaction, index: int):
     guild_id = interaction.guild.id if vc else 0
     channel_id = vc.channel.id if vc else 0
 
-    # Persist the change immediately to our serialized files before spawning processes
     save_stream_state(guild_id, channel_id, index, is_active=(vc is not None))
 
     if vc and vc.is_connected():
@@ -399,7 +407,6 @@ async def tune_channel(interaction: discord.Interaction, frequency: str):
         save_stream_state(interaction.guild.id, vc.channel.id, current_index, is_active=True)
         await execute_stream_pipeline(interaction, vc.channel, force_index=current_index)
     else:
-        # If not streaming, cache the chosen frequency parameter to the file system right away
         current_index = 0
         if os.path.exists(STATE_FILE):
             try:
@@ -518,11 +525,11 @@ async def wake(interaction: discord.Interaction, duration: str):
     await interaction.response.send_message(f"⏰ Wake timer initialized. Broadcasting starts automatically in **{duration}**.")
 
 # =========================================================================
-# 7. CRASH RECOVERY LIFECYCLES & STARTUP HOOKS (FULLY SYSTEM INTEGRATED)
+# 7. CRASH RECOVERY LIFECYCLES & STARTUP HOOKS
 # =========================================================================
 @bot.event
 async def on_ready():
-    global CURRENT_TUNED_CHANNEL
+    global CURRENT_TUNED_CHANNEL, CURRENT_VOLUME_LEVEL
     print(f"🤖 Automated profile online. Logged in as: {bot.user.name}")
     
     if RECOVERY_MODE == "stay_disconnected":
@@ -537,18 +544,19 @@ async def on_ready():
         with open(STATE_FILE, 'r') as f:
             data = json.load(f)
         
-        # FIXED: Only trigger auto-reconnection loops if the bot was actively streaming before the reboot/crash
+        if "tuned_frequency" in data:
+            CURRENT_TUNED_CHANNEL = data["tuned_frequency"]
+        if "volume_level" in data:
+            CURRENT_VOLUME_LEVEL = data["volume_level"]
+
+        # FIXED: Safeguard early return. Safely leaves the gateway thread open for business
         if not data.get("is_active", True):
-            print("🔄 [Recovery] Found dormant configuration profile records. Retaining cached parameters without auto-connecting.")
-            if "tuned_frequency" in data:
-                CURRENT_TUNED_CHANNEL = data["tuned_frequency"]
+            print(f"🔄 [Recovery] Found dormant profile configuration parameters. Caching frequency baseline {CURRENT_TUNED_CHANNEL} and volume {int(CURRENT_VOLUME_LEVEL * 100)}% without auto-connecting.")
             return
 
         guild_id = data.get("guild_id")
         channel_id = data.get("channel_id")
         current_index = data.get("selected_index", 0)
-        if "tuned_frequency" in data:
-            CURRENT_TUNED_CHANNEL = data["tuned_frequency"]
 
         channel = bot.get_channel(channel_id)
         if not channel or not isinstance(channel, discord.VoiceChannel):
@@ -556,7 +564,7 @@ async def on_ready():
             clear_stream_state()
             return
 
-        print(f"🔄 [Recovery] Resuming broadcast on target channel map: {channel.name} at frequency {CURRENT_TUNED_CHANNEL}")
+        print(f"🔄 [Recovery] Resuming broadcast on target channel map: {channel.name} at frequency {CURRENT_TUNED_CHANNEL} (Volume: {int(CURRENT_VOLUME_LEVEL * 100)}%)")
         
         class SynthesizedInteraction:
             def __init__(self, g, ch):
