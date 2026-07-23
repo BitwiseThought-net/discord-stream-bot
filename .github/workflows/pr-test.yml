@@ -4,7 +4,6 @@ on:
   pull_request:
     types: [opened, synchronize, reopened]
 
-# Permissions required to let the workflow write check summaries and comment on the PR
 permissions:
   id-token: write
   contents: read
@@ -12,6 +11,23 @@ permissions:
   pull-requests: write
 
 jobs:
+  linting-optional:
+    runs-on: ubuntu-latest
+    continue-on-error: true # <-- Makes linting optional (PR will not block on style errors)
+    steps:
+      - name: Checkout Code Repository
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Run Optional Linter Check
+        run: |
+          pip install flake8 || true
+          flake8 . --count --select=E9,F63,F7,F82 --show-source --statistics || true
+
   run-tests:
     runs-on: ubuntu-latest
     steps:
@@ -23,32 +39,27 @@ jobs:
         with:
           python-version: '3.11'
 
+      - name: Install System Architecture Packages
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y alsa-utils libasound2-dev
+
       - name: Install Test Dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install pytest pytest-cov discord.py PyNaCl davey
+          pip install pytest pytest-cov discord.py PyNaCl
 
-      - name: Execute Test Suite
+      - name: Execute Comprehensive Test Suite
         run: |
-          echo "🚀 Running unit test & coverage pipelines..."
-          # Executes pytest and generates the junit.xml and coverage.xml files
-          pytest test_bot.py -v
+          echo "🚀 Running test suite with strict coverage tracking..."
+          pytest --cov=stream_bot --cov-report=xml test_bot.py -v
 
-      # 1. Surface individual test results natively in a new "Checks" tab on the PR
-      - name: Publish Unit Test Results Check Tab
-        uses: dorny/test-reporter@v1
-        if: success() || failure()
-        with:
-          name: Pytest Unit Test Specifications
-          path: junit.xml
-          reporter: java-junit
-
-      # 2. Extract code coverage percentages and write a summary comment on the PR file changes list
-      - name: Publish Code Coverage Markdown Summary
+      # Enforces a mandatory, breaking 70% threshold boundary block
+      - name: Publish Code Coverage Summary
         uses: 5monkeys/cobertura-action@master
         if: success() || failure()
         with:
           path: coverage.xml
           repo_token: ${{ secrets.GITHUB_TOKEN }}
           minimum_coverage: 70
-          fail_below_min: false
+          fail_below_min: true # <-- FORCES PR FAILURE IF UNDER THE 70% MINIMUM BOUNDARY
