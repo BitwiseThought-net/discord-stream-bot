@@ -49,13 +49,11 @@ except Exception as e:
 class StreamBotClient(discord.Client):
     def __init__(self):
         intents = discord.Intents.default()
-        intents.message_content = True  # Verified Privileged Intent Parameter
+        intents.message_content = True
         super().__init__(intents=intents)
         self.tree = app_commands.CommandTree(self)
         self.sleep_tasks = {}  # guild_id -> active sleep worker task
         self.wake_tasks = {}   # guild_id -> active wake worker task
-        
-        # Explicit process tree registers to handle safe hot-swapping
         self.hardware_process = None
         self.sox_process = None
         self.ffmpeg_process = None
@@ -403,17 +401,14 @@ async def list_sources(interaction: discord.Interaction):
     visible_count = 0
     
     for idx, src in enumerate(sources):
-        # FIXED: Explicitly filter out the developer diagnostic tool from the user-facing list string
         if src["type"] == "test_signal":
             continue
             
         visible_count += 1
-        response += f"`[{idx}]` — **{src['type']}**: {src['description']}\n"
+        response += f"`{idx}` : {src['description']}\n"
     
     if visible_count == 0:
         response += "⚠️ *No physical audio hardware interfaces detected on this station. Falling back to internal system loops.*\n"
-    
-    response += "\n*Change inputs anytime using `/radio input <index>`.*"
     await interaction.followup.send(response)
 
 @radio_group.command(name="input", description="Switch the current capture interface using its catalog index")
