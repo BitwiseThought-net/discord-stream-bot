@@ -1,0 +1,7 @@
+{
+    "type": "alsa",
+    "description": "USB Microphone ({device})",
+    "mono_description": "USB Mono Microphone ({device})",
+    "discovery_trigger": "alsa_sound_card",
+    "pipeline_template": "ffmpeg -y -f alsa -ac {channels} -i {device} -f s16le -ar 48k -ac 2 pipe:1 >> {fifo_pipe}"
+}

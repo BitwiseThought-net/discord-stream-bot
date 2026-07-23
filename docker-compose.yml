@@ -3,17 +3,19 @@ services:
     build: .
     container_name: discord_audio_bot
     restart: always
-    privileged: true # <-- Required: Grants container authority to detach host kernel modules and read raw USB frames
-    devices:
-      - /dev/snd:/dev/snd
-      - /dev/bus/usb:/dev/bus/usb # <-- Required: Pipes raw hardware USB register pools into the container filesystem
-    volumes:
-      - /proc/asound:/mnt/asound:ro
-      - bot_data:/data
+    privileged: true
+    network_mode: host
     environment:
       - DISCORD_TOKEN=${DISCORD_TOKEN}
-      - COMMAND_BASE=${COMMAND_BASE}
-      - RECOVERY_MODE=${RECOVERY_MODE}
+      - COMMAND_BASE=${COMMAND_BASE:-radio}
+      - RECOVERY_MODE=${RECOVERY_MODE:-resume}
+    volumes:
+      - discord_bot_data:/data
+      - ./sources:/sources:ro
+    devices:
+      - "/dev/bus/usb:/dev/bus/usb"
+      - "/dev/snd:/dev/snd"
 
 volumes:
-  bot_data:
+  discord_bot_data:
+    name: discord_bot_data

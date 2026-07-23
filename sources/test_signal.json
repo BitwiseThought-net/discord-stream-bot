@@ -1,0 +1,6 @@
+{
+    "type": "test_signal",
+    "description": "🛠️ Diagnostic Test Signal (Analog Calibration Tone)",
+    "discovery_trigger": "always_available",
+    "pipeline_template": "ffmpeg -f lavfi -i \"sine=frequency=440:sample_rate=48000\" -f s16le -ar 48k -ac 2 pipe:1 >> {fifo_pipe}"
+}

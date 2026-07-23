@@ -1,0 +1,6 @@
+{
+    "type": "sdr_aircraft",
+    "description": "Track Aircraft (ADS-B) with the USB Nooelec RTL-SDR v5",
+    "discovery_trigger": "usb_chipset_0bda:2838",
+    "pipeline_template": "rtl_fm -f {frequency} -M am -s 25k -r 24k -g 48 | sox -t raw -r 24k -e signed-integer -b 16 -c 1 - -t raw -r 48k - | ffmpeg -y -f s16le -ar 48k -ac 1 -i pipe:0 -f s16le -ar 48k -ac 2 pipe:1 >> {fifo_pipe}"
+}

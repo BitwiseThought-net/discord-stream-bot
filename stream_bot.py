@@ -3,6 +3,7 @@ import sys
 import json
 import asyncio
 import re
+import signal
 import subprocess
 from datetime import datetime, timedelta
 import discord
@@ -17,8 +18,10 @@ COMMAND_NAME = os.getenv('COMMAND_BASE', 'radio')
 RECOVERY_MODE = os.getenv('RECOVERY_MODE', 'resume')
 
 STATE_FILE = "/data/state.json"
-SOURCES_FILE = "/data/sources.json"
+SOURCES_CACHE_FILE = "/data/sources_cache.json"
 FIFO_PIPE = "/data/audio_pipe"      # Continuous shared audio stream buffer
+SOURCES_DIR = "/sources"            # Configuration directory holding isolated profiles
+
 CURRENT_TUNED_CHANNEL = "94.9M"
 CURRENT_VOLUME_LEVEL = 1.0          # Global persistent tracking memory register for volume level
 
@@ -26,7 +29,8 @@ if not DISCORD_TOKEN:
     print("❌ Critical Error: DISCORD_TOKEN environment variable is missing.")
     sys.exit(1)
 
-# Ensure the decoupled filesystem Named Pipe exists immediately
+# Ensure core operational folders and the Named Pipe exist immediately
+os.makedirs(SOURCES_DIR, exist_ok=True)
 if not os.path.exists(FIFO_PIPE):
     try:
         os.makedirs(os.path.dirname(FIFO_PIPE), exist_ok=True)
@@ -66,15 +70,15 @@ radio_group = app_commands.Group(name=COMMAND_NAME, description="Audio hardware 
 # =========================================================================
 # 2. PERSISTENT LOCAL FILE STATE WRAPPERS
 # =========================================================================
-def save_stream_state(guild_id: int, channel_id: int, selected_index: int = 0, is_active: bool = True):
-    """Serializes absolute tracking boundaries, volume multipliers, and frequencies to disk."""
+def save_stream_state(guild_id: int, channel_id: int, selected_source: str = "test_signal", is_active: bool = True):
+    """Serializes absolute tracking boundaries using explicit string tokens instead of indices."""
     global CURRENT_TUNED_CHANNEL, CURRENT_VOLUME_LEVEL
     try:
         os.makedirs(os.path.dirname(STATE_FILE), exist_ok=True)
         payload = {
             "guild_id": guild_id,
             "channel_id": channel_id,
-            "selected_index": selected_index,
+            "selected_source": selected_source,
             "tuned_frequency": CURRENT_TUNED_CHANNEL,
             "volume_level": CURRENT_VOLUME_LEVEL,
             "is_active": is_active
@@ -96,149 +100,201 @@ def clear_stream_state():
     except Exception as e:
         print(f"⚠️ [State Storage] Failed updating connection state parameters: {e}")
 # =========================================================================
-# 3. ADVANCED HARDWARE SUBSYSTEM DISCOVERY PROTOCOLS
+# 3. SELF-HEALING CONFIGURATION-DRIVEN HARDWARE DISCOVERY PROTOCOLS
 # =========================================================================
+def self_heal_test_signal_profile():
+    """Enforces absolute baseline system stability by auto-healing the fallback matrix file if deleted."""
+    target_path = os.path.join(SOURCES_DIR, "test_signal.json")
+    if not os.path.exists(target_path):
+        print("📁 [Self-Healing] test_signal.json missing from profiles folder. Re-seeding baseline code...")
+        payload = {
+            "type": "test_signal",
+            "description": "🛠️ Diagnostic Test Signal (Analog Calibration Tone)",
+            "discovery_trigger": "always_available",
+            "pipeline_template": "ffmpeg -y -f lavfi -i \"sine=frequency=440:sample_rate=48000\" -f s16le -ar 48k -ac 2 pipe:1 >> {fifo_pipe}"
+        }
+        try:
+            with open(target_path, 'w') as f:
+                json.dump(payload, f, indent=4)
+        except Exception as e:
+            print(f"⚠️ [Self-Healing] Failed to write fallback matrix file layout profile: {e}")
+
+def load_matrix_source_profiles():
+    """Reads profile files from /sources with purely read-only permissions, executing self-healing first."""
+    self_heal_test_signal_profile()
+    profiles = {}
+    
+    for filename in sorted(os.listdir(SOURCES_DIR)):
+        if filename.endswith(".json"):
+            try:
+                with open(os.path.join(SOURCES_DIR, filename), 'r') as f:
+                    data = json.load(f)
+                    if "type" in data:
+                        profiles[data["type"]] = data
+            except Exception as e:
+                print(f"⚠️ [Matrix Loader] Failed parsing file profile {filename}: {e}")
+    return profiles
+
 def discover_hardware_profile():
-    """Scans system registers, saves multi-input modes, and logs persistent catalogs."""
+    """Scans hardware registers and guarantees index 0 is locked exclusively to the diagnostic backdoor."""
     available_sources = []
+    matrix_profiles = load_matrix_source_profiles()
     base_dir = "/proc/asound"
 
-    # 1. CARD INVENTORY STAGE: Extract physical ALSA endpoints (USB Microphones)
-    if os.path.exists(base_dir):
-        try:
-            cards = [d for d in os.listdir(base_dir) if d.startswith("card") and os.path.isdir(os.path.join(base_dir, d))]
-            for card in sorted(cards):
-                card_index = card.replace("card", "")
-                device_string = f"plughw:{card_index},0"
-                channels = "2"
-                label = f"USB Microphone ({device_string})"
+    # FIXED: Index 0 is explicitly locked to the virtual test engine baseline entry first
+    test_config = matrix_profiles.get("test_signal", {
+        "type": "test_signal",
+        "description": "🛠️ Diagnostic Test Signal (Analog Calibration Tone)"
+    })
+    available_sources.append({
+        "type": "test_signal",
+        "device": "virtual",
+        "channels": "2",
+        "description": test_config.get("description")
+    })
 
-                stream_info = os.path.join(base_dir, card, "usbstream")
-                if not os.path.exists(stream_info):
-                    stream_info = os.path.join(base_dir, card, "stream0")
-                if os.path.exists(stream_info):
-                    with open(stream_info, 'r') as f:
-                        if "1 channel" in f.read().lower():
-                            channels = "1"
-                            label = f"USB Mono Microphone ({device_string})"
-
-                available_sources.append({
-                    "type": "alsa",
-                    "device": device_string,
-                    "channels": channels,
-                    "description": label
-                })
-        except Exception as e:
-            print(f"⚠️ ALSA hardware inventory scan warning: {e}")
-
-    # 2. USB REGISTER INVENTORY STAGE: Scan for Nooelec NESDR SMArt v5 RTL2832U chipsets
     try:
         usb_check = subprocess.run(["lsusb"], capture_output=True, text=True)
-        if "0bda:2838" in usb_check.stdout or "rtl2832" in usb_check.stdout.lower():
-            available_sources.extend([
-                {
-                    "type": "sdr_radio",
-                    "device": "rtlsdr",
-                    "channels": "1",
-                    "description": "Listen to Radio (FM & HAM) with the USB Nooelec RTL-SDR v5"
-                },
-                {
-                    "type": "sdr_aircraft",
-                    "device": "rtlsdr",
-                    "channels": "1",
-                    "description": "Track Aircraft (ADS-B) with the USB Nooelec RTL-SDR v5"
-                },
-                {
-                    "type": "sdr_satellite",
-                    "device": "rtlsdr",
-                    "channels": "1",
-                    "description": "Receive Weather Satellite Data with the USB Nooelec RTL-SDR v5"
-                }
-            ])
+        usb_output = usb_check.stdout.lower()
     except Exception:
-        pass
+        usb_output = ""
 
-    # Fallback configuration profile layer
-    if not available_sources:
-        available_sources.append({
-            "type": "alsa",
-            "device": "plughw:1,0",
-            "channels": "2",
-            "description": "Default System Fallback Capture Profile (plughw:1,0)"
-        })
+    # Scan and append detected hardware profiles behind index 0
+    for s_type, config in matrix_profiles.items():
+        if s_type == "test_signal":
+            continue  # Already locked to position 0
+            
+        trigger = config.get("discovery_trigger", "")
+        
+        # 1. ALSA PROBE GATES
+        if trigger == "alsa_sound_card" and os.path.exists(base_dir):
+            try:
+                cards = [d for d in os.listdir(base_dir) if d.startswith("card") and os.path.isdir(os.path.join(base_dir, d))]
+                for card in sorted(cards):
+                    card_index = card.replace("card", "")
+                    device_string = f"plughw:{card_index},0"
+                    channels = "2"
+                    label_template = config.get("description", "USB Microphone ({device})")
+
+                    stream_info = os.path.join(base_dir, card, "usbstream")
+                    if not os.path.exists(stream_info):
+                        stream_info = os.path.join(base_dir, card, "stream0")
+                    if os.path.exists(stream_info):
+                        with open(stream_info, 'r') as f:
+                            if "1 channel" in f.read().lower():
+                                channels = "1"
+                                label_template = config.get("mono_description", "USB Mono Microphone ({device})")
+
+                    available_sources.append({
+                        "type": s_type,
+                        "device": device_string,
+                        "channels": channels,
+                        "description": label_template.format(device=device_string)
+                    })
+            except Exception as e:
+                print(f"⚠️ ALSA file matrix scan exception: {e}")
+        
+        # 2. SDR PROBE GATES
+        elif trigger.startswith("usb_chipset_"):
+            target_id = trigger.replace("usb_chipset_", "").lower()
+            if target_id in usb_output or "rtl2832" in usb_output:
+                available_sources.append({
+                    "type": s_type,
+                    "device": "rtlsdr",
+                    "channels": "1",
+                    "description": config.get("description", f"SDR Module Channel Capture ({s_type})")
+                })
 
     try:
-        os.makedirs(os.path.dirname(SOURCES_FILE), exist_ok=True)
-        with open(SOURCES_FILE, 'w') as f:
+        os.makedirs(os.path.dirname(SOURCES_CACHE_FILE), exist_ok=True)
+        with open(SOURCES_CACHE_FILE, 'w') as f:
             json.dump(available_sources, f, indent=4)
     except Exception as e:
-        print(f"⚠️ Failed writing data source payload index map: {e}")
+        print(f"⚠️ Failed writing data cache map layout properties: {e}")
 
     return available_sources
 # =========================================================================
 # 4. BROADCAST CORE PIPELINE HANDLERS
 # =========================================================================
 def stop_active_hardware_process():
-    """Explicitly terminates all running hardware pipeline process layers completely."""
+    """Explicitly terminates all running hardware pipeline process layers completely.
+
+    NOTE: our pipeline_templates are shell strings joined with `|` (e.g.
+    "rtl_fm ... | ffmpeg ... >> {fifo_pipe}"). Because they're launched with
+    shell=True, the Popen object we hold is a handle to the *shell*, not to
+    rtl_fm/sox/ffmpeg themselves. Since there's a pipe involved, the shell
+    can't exec() directly into one command -- it forks children for each
+    stage and waits on them. Calling proc.terminate()/kill() only signals
+    that shell wrapper; the forked children get orphaned and keep running,
+    continuing to write audio into the shared FIFO. That's what caused the
+    "previous station still playing" / interlaced-audio bug when swapping
+    sources or frequencies.
+
+    Fix: spawn_hardware_capture_stream() starts the shell in its own process
+    group (start_new_session=True). Here we signal the whole group with
+    os.killpg(), which reaches the shell AND every child it forked.
+    """
     for proc_attr in ['ffmpeg_process', 'sox_process', 'hardware_process']:
         proc = getattr(bot, proc_attr)
         if proc is not None:
             try:
-                proc.terminate()
-                proc.wait(timeout=0.2)
+                pgid = os.getpgid(proc.pid)
+                os.killpg(pgid, signal.SIGTERM)
+                proc.wait(timeout=1.0)
             except Exception:
-                try: proc.kill()
-                except Exception: pass
+                try:
+                    os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+                    proc.wait(timeout=1.0)
+                except Exception:
+                    try:
+                        proc.kill()
+                    except Exception:
+                        pass
             setattr(bot, proc_attr, None)
 
 def spawn_hardware_capture_stream(active_source):
-    """Spawns processes natively as arrays, utilizing the persistent pipe handler."""
+    """Parses shell parameters dynamically from separate JSON profiles and spawns arrays."""
     global CURRENT_TUNED_CHANNEL
     s_type = active_source["type"]
 
     stop_active_hardware_process()
 
-    if s_type == "alsa":
-        device_target = active_source['device']
-        channel_count = active_source['channels']
-        ffmpeg_cmd = ["ffmpeg", "-y", "-f", "alsa", "-ac", channel_count, "-i", device_target, "-f", "s16le", "-ar", "48k", "-ac", "2", "pipe:1"]
-        bot.ffmpeg_process = subprocess.Popen(ffmpeg_cmd, stdout=PIPE_WRITE_HANDLE, stderr=subprocess.DEVNULL)
-    else:
-        if s_type == "sdr_radio":
-            rtl_cmd = ["rtl_fm", "-f", CURRENT_TUNED_CHANNEL, "-M", "wbo", "-s", "170k", "-r", "48k", "-g", "40"]
-            ffmpeg_cmd = ["ffmpeg", "-y", "-f", "s16le", "-ar", "48k", "-ac", "1", "-i", "pipe:0", "-f", "s16le", "-ar", "48k", "-ac", "2", "pipe:1"]
-            
-            bot.hardware_process = subprocess.Popen(rtl_cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
-            bot.ffmpeg_process = subprocess.Popen(ffmpeg_cmd, stdin=bot.hardware_process.stdout, stdout=PIPE_WRITE_HANDLE, stderr=subprocess.DEVNULL)
-        
-        elif s_type == "sdr_aircraft":
-            rtl_cmd = ["rtl_fm", "-f", CURRENT_TUNED_CHANNEL, "-M", "am", "-s", "25k", "-r", "24k", "-g", "48"]
-            sox_cmd = ["sox", "-t", "raw", "-r", "24k", "-e", "signed-integer", "-b", "16", "-c", "1", "-", "-t", "raw", "-r", "48k", "-"]
-            ffmpeg_cmd = ["ffmpeg", "-y", "-f", "s16le", "-ar", "48k", "-ac", "1", "-i", "pipe:0", "-f", "s16le", "-ar", "48k", "-ac", "2", "pipe:1"]
-            
-            bot.hardware_process = subprocess.Popen(rtl_cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
-            bot.sox_process = subprocess.Popen(sox_cmd, stdin=bot.hardware_process.stdout, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
-            bot.ffmpeg_process = subprocess.Popen(ffmpeg_cmd, stdin=bot.sox_process.stdout, stdout=PIPE_WRITE_HANDLE, stderr=subprocess.DEVNULL)
-        
-        elif s_type == "sdr_satellite":
-            rtl_cmd = ["rtl_fm", "-f", CURRENT_TUNED_CHANNEL, "-M", "fm", "-s", "40k", "-r", "32k", "-g", "45"]
-            sox_cmd = ["sox", "-t", "raw", "-r", "32k", "-e", "signed-integer", "-b", "16", "-c", "1", "-", "-t", "raw", "-r", "48k", "-"]
-            ffmpeg_cmd = ["ffmpeg", "-y", "-f", "s16le", "-ar", "48k", "-ac", "1", "-i", "pipe:0", "-f", "s16le", "-ar", "48k", "-ac", "2", "pipe:1"]
-            
-            bot.hardware_process = subprocess.Popen(rtl_cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
-            bot.sox_process = subprocess.Popen(sox_cmd, stdin=bot.hardware_process.stdout, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
-            bot.ffmpeg_process = subprocess.Popen(ffmpeg_cmd, stdin=bot.sox_process.stdout, stdout=PIPE_WRITE_HANDLE, stderr=subprocess.DEVNULL)
+    matrix_profiles = load_matrix_source_profiles()
+    if s_type not in matrix_profiles:
+        print(f"❌ [Pipeline Lock] Configuration map profile missing for type: {s_type}")
+        return
 
-async def execute_stream_pipeline(interaction: discord.Interaction, channel: discord.VoiceChannel, force_index: int = None):
-    """Binds the voice client loop to our continuous filesystem FIFO stream handle, preserving historical data."""
+    raw_template = matrix_profiles[s_type].get("pipeline_template", "")
+    if not raw_template:
+        print(f"❌ [Pipeline Lock] Explicit template structure empty inside configuration profile: {s_type}")
+        return
+
+    compiled_pipeline = raw_template.format(
+        frequency=CURRENT_TUNED_CHANNEL,
+        device=active_source.get("device", ""),
+        channels=active_source.get("channels", "2"),
+        fifo_pipe=FIFO_PIPE
+    )
+
+    bot.hardware_process = subprocess.Popen(
+        compiled_pipeline,
+        shell=True,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        start_new_session=True,  # own process group, so stop_active_hardware_process() can killpg() every stage of the shell pipeline
+    )
+
+async def execute_stream_pipeline(interaction: discord.Interaction, channel: discord.VoiceChannel, force_source_type: str = None):
+    """Binds the voice client loop to our continuous filesystem FIFO stream handle, using string keys."""
     global CURRENT_TUNED_CHANNEL, CURRENT_VOLUME_LEVEL
-    current_index = 0
+    target_source_type = "test_signal"
     
     if os.path.exists(STATE_FILE):
         try:
             with open(STATE_FILE, 'r') as f:
                 saved_data = json.load(f)
-            current_index = saved_data.get("selected_index", 0)
+            if "selected_source" in saved_data:
+                target_source_type = saved_data["selected_source"]
             if "tuned_frequency" in saved_data:
                 CURRENT_TUNED_CHANNEL = saved_data["tuned_frequency"]
             if "volume_level" in saved_data:
@@ -246,18 +302,19 @@ async def execute_stream_pipeline(interaction: discord.Interaction, channel: dis
         except Exception:
             pass
 
-    if force_index is not None:
-        current_index = force_index
+    if force_source_type is not None:
+        target_source_type = force_source_type
 
-    if not os.path.exists(SOURCES_FILE):
+    if not os.path.exists(SOURCES_CACHE_FILE):
         discover_hardware_profile()
 
     try:
-        with open(SOURCES_FILE, 'r') as f:
-            sources = json.load(f)
-        if current_index >= len(sources):
-            current_index = 0
-        active_source = sources[current_index]
+        with open(SOURCES_CACHE_FILE, 'r') as f:
+            detected_sources = json.load(f)
+        
+        active_source = next((s for s in detected_sources if s["type"] == target_source_type), None)
+        if active_source is None:
+            active_source = detected_sources[0] if detected_sources else {"type": "test_signal", "description": "Diagnostic Fallback"}
     except Exception:
         await interaction.followup.send("❌ Data engine error. Rebuild profiles using `/radio list`.")
         return
@@ -277,7 +334,7 @@ async def execute_stream_pipeline(interaction: discord.Interaction, channel: dis
             transformer = discord.PCMVolumeTransformer(audio_stream, volume=CURRENT_VOLUME_LEVEL)
             vc.play(transformer)
         
-        save_stream_state(interaction.guild.id, channel.id, current_index, is_active=True)
+        save_stream_state(interaction.guild.id, channel.id, active_source["type"], is_active=True)
         await interaction.followup.send(f"🎙️ Connected! Stream type: **{active_source['description']}**.")
     except Exception as e:
         await interaction.followup.send(f"❌ Failed initializing device link pipeline: {e}")
@@ -324,14 +381,14 @@ async def volume(interaction: discord.Interaction, percentage: int):
     vc.source.volume = target_volume
     CURRENT_VOLUME_LEVEL = target_volume
     
-    current_index = 0
+    current_source_type = "test_signal"
     try:
         if os.path.exists(STATE_FILE):
             with open(STATE_FILE, 'r') as f:
-                current_index = json.load(f).get("selected_index", 0)
+                current_source_type = json.load(f).get("selected_source", "test_signal")
     except Exception: pass
     
-    save_stream_state(interaction.guild.id, vc.channel.id, current_index, is_active=True)
+    save_stream_state(interaction.guild.id, vc.channel.id, current_source_type, is_active=True)
     await interaction.response.send_message(f"🔊 Dynamic playback volume adjusted and saved to **{percentage}%**.")
 
 # =========================================================================
@@ -343,20 +400,30 @@ async def list_sources(interaction: discord.Interaction):
     sources = discover_hardware_profile()
     
     response = "📡 **Available Hardware Capture Interfaces:**\n"
+    visible_count = 0
+    
     for idx, src in enumerate(sources):
-        response += f"`[{idx}]` — {src['description']}\n"
+        # FIXED: Explicitly filter out the developer diagnostic tool from the user-facing list string
+        if src["type"] == "test_signal":
+            continue
+            
+        visible_count += 1
+        response += f"`[{idx}]` — **{src['type']}**: {src['description']}\n"
+    
+    if visible_count == 0:
+        response += "⚠️ *No physical audio hardware interfaces detected on this station. Falling back to internal system loops.*\n"
     
     response += "\n*Change inputs anytime using `/radio input <index>`.*"
     await interaction.followup.send(response)
 
 @radio_group.command(name="input", description="Switch the current capture interface using its catalog index")
 async def set_input(interaction: discord.Interaction, index: int):
-    if not os.path.exists(SOURCES_FILE):
+    if not os.path.exists(SOURCES_CACHE_FILE):
         await interaction.response.send_message("❌ Error: Device catalog not initialized. Please run `/radio list` first.", ephemeral=True)
         return
 
     try:
-        with open(SOURCES_FILE, 'r') as f:
+        with open(SOURCES_CACHE_FILE, 'r') as f:
             sources = json.load(f)
     except Exception:
         await interaction.response.send_message("❌ Error: Failed to evaluate source registry mapping rules on disk.", ephemeral=True)
@@ -366,17 +433,18 @@ async def set_input(interaction: discord.Interaction, index: int):
         await interaction.response.send_message(f"❌ Error: Index must be a valid target between `0` and `{len(sources) - 1}`.", ephemeral=True)
         return
 
+    target_source_type = sources[index]["type"]
     vc = interaction.guild.voice_client
     guild_id = interaction.guild.id if vc else 0
     channel_id = vc.channel.id if vc else 0
 
-    save_stream_state(guild_id, channel_id, index, is_active=(vc is not None))
+    save_stream_state(guild_id, channel_id, target_source_type, is_active=(vc is not None))
 
     if vc and vc.is_connected():
         await interaction.response.defer(ephemeral=True)
-        await execute_stream_pipeline(interaction, vc.channel, force_index=index)
+        await execute_stream_pipeline(interaction, vc.channel, force_source_type=target_source_type)
     else:
-        await interaction.response.send_message(f"✅ Target capture source configuration locked to input entry `[{index}]`: *{sources[index]['description']}*.")
+        await interaction.response.send_message(f"✅ Target capture source locked to configuration file token: **{target_source_type}**.")
 
 @radio_group.command(name="channel", description="Tune the NESDR SMArt v5 receiver frequency channel link")
 async def tune_channel(interaction: discord.Interaction, frequency: str):
@@ -396,24 +464,25 @@ async def tune_channel(interaction: discord.Interaction, frequency: str):
     if vc and vc.is_connected():
         await interaction.response.defer(ephemeral=True)
         
-        current_index = 0
+        current_source_type = "test_signal"
         try:
             if os.path.exists(STATE_FILE):
                 with open(STATE_FILE, 'r') as f:
-                    current_index = json.load(f).get("selected_index", 0)
+                    current_source_type = json.load(f).get("selected_source", "test_signal")
         except Exception:
             pass
 
-        save_stream_state(interaction.guild.id, vc.channel.id, current_index, is_active=True)
-        await execute_stream_pipeline(interaction, vc.channel, force_index=current_index)
+        save_stream_state(interaction.guild.id, vc.channel.id, current_source_type, is_active=True)
+        await execute_stream_pipeline(interaction, vc.channel, force_source_type=current_source_type)
     else:
-        current_index = 0
+        current_source_type = "test_signal"
         if os.path.exists(STATE_FILE):
             try:
+                
                 with open(STATE_FILE, 'r') as f:
-                    current_index = json.load(f).get("selected_index", 0)
+                    current_source_type = json.load(f).get("selected_source", "test_signal")
             except Exception: pass
-        save_stream_state(0, 0, current_index, is_active=False)
+        save_stream_state(0, 0, current_source_type, is_active=False)
         await interaction.response.send_message(f"📡 Tuner frequency baseline channel set to **{clean_freq}** for next SDR stream run.")
 # =========================================================================
 # 6. TIMED OPERATION SCHEDULERS (SLEEP / WAKE ENGINE)
@@ -549,14 +618,14 @@ async def on_ready():
         if "volume_level" in data:
             CURRENT_VOLUME_LEVEL = data["volume_level"]
 
-        # FIXED: Safeguard early return. Safely leaves the gateway thread open for business
+        current_source_type = data.get("selected_source", "test_signal")
+
         if not data.get("is_active", True):
-            print(f"🔄 [Recovery] Found dormant profile configuration parameters. Caching frequency baseline {CURRENT_TUNED_CHANNEL} and volume {int(CURRENT_VOLUME_LEVEL * 100)}% without auto-connecting.")
+            print(f"🔄 [Recovery] Found dormant profile configuration parameters. Caching source token {current_source_type}, baseline {CURRENT_TUNED_CHANNEL} without auto-connecting.")
             return
 
         guild_id = data.get("guild_id")
         channel_id = data.get("channel_id")
-        current_index = data.get("selected_index", 0)
 
         channel = bot.get_channel(channel_id)
         if not channel or not isinstance(channel, discord.VoiceChannel):
@@ -564,7 +633,7 @@ async def on_ready():
             clear_stream_state()
             return
 
-        print(f"🔄 [Recovery] Resuming broadcast on target channel map: {channel.name} at frequency {CURRENT_TUNED_CHANNEL} (Volume: {int(CURRENT_VOLUME_LEVEL * 100)}%)")
+        print(f"🔄 [Recovery] Resuming broadcast on target channel map: {channel.name} using engine token: {current_source_type}")
         
         class SynthesizedInteraction:
             def __init__(self, g, ch):
@@ -579,7 +648,7 @@ async def on_ready():
                 async def send(content): print(f"📢 [Recovery Notice] {content}")
 
         fake_interaction = SynthesizedInteraction(channel.guild, channel)
-        await execute_stream_pipeline(fake_interaction, channel, force_index=current_index)
+        await execute_stream_pipeline(fake_interaction, channel, force_source_type=current_source_type)
         print("🔄 [Recovery] State resume completed successfully.")
     except Exception as e:
         print(f"❌ [Recovery] Internal failure processing recovery routine payload: {e}")
