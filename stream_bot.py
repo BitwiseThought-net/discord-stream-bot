@@ -3,6 +3,7 @@ import sys
 import json
 import asyncio
 import re
+import signal
 import subprocess
 from datetime import datetime, timedelta
 import discord
@@ -216,16 +217,39 @@ def discover_hardware_profile():
 # 4. BROADCAST CORE PIPELINE HANDLERS
 # =========================================================================
 def stop_active_hardware_process():
-    """Explicitly terminates all running hardware pipeline process layers completely."""
+    """Explicitly terminates all running hardware pipeline process layers completely.
+
+    NOTE: our pipeline_templates are shell strings joined with `|` (e.g.
+    "rtl_fm ... | ffmpeg ... >> {fifo_pipe}"). Because they're launched with
+    shell=True, the Popen object we hold is a handle to the *shell*, not to
+    rtl_fm/sox/ffmpeg themselves. Since there's a pipe involved, the shell
+    can't exec() directly into one command -- it forks children for each
+    stage and waits on them. Calling proc.terminate()/kill() only signals
+    that shell wrapper; the forked children get orphaned and keep running,
+    continuing to write audio into the shared FIFO. That's what caused the
+    "previous station still playing" / interlaced-audio bug when swapping
+    sources or frequencies.
+
+    Fix: spawn_hardware_capture_stream() starts the shell in its own process
+    group (start_new_session=True). Here we signal the whole group with
+    os.killpg(), which reaches the shell AND every child it forked.
+    """
     for proc_attr in ['ffmpeg_process', 'sox_process', 'hardware_process']:
         proc = getattr(bot, proc_attr)
         if proc is not None:
             try:
-                proc.terminate()
-                proc.wait(timeout=0.2)
+                pgid = os.getpgid(proc.pid)
+                os.killpg(pgid, signal.SIGTERM)
+                proc.wait(timeout=1.0)
             except Exception:
-                try: proc.kill()
-                except Exception: pass
+                try:
+                    os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+                    proc.wait(timeout=1.0)
+                except Exception:
+                    try:
+                        proc.kill()
+                    except Exception:
+                        pass
             setattr(bot, proc_attr, None)
 
 def spawn_hardware_capture_stream(active_source):
@@ -256,7 +280,8 @@ def spawn_hardware_capture_stream(active_source):
         compiled_pipeline,
         shell=True,
         stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL
+        stderr=subprocess.DEVNULL,
+        start_new_session=True,  # own process group, so stop_active_hardware_process() can killpg() every stage of the shell pipeline
     )
 
 async def execute_stream_pipeline(interaction: discord.Interaction, channel: discord.VoiceChannel, force_source_type: str = None):
