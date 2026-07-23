@@ -1,6 +1,6 @@
 {
     "type": "sdr_radio",
-    "description": "Listen to Radio (FM & HAM) with the USB Nooelec RTL-SDR v5",
+    "description": "Radio (FM & HAM)",
     "discovery_trigger": "usb_chipset_0bda:2838",
     "pipeline_template": "rtl_fm -f {frequency} -M wbo -s 170k -r 48k -g 40 | ffmpeg -y -f s16le -ar 48k -ac 1 -i pipe:0 -f s16le -ar 48k -ac 2 pipe:1 >> {fifo_pipe}"
 }
