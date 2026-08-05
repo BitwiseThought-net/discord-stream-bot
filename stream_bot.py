@@ -68,8 +68,17 @@ radio_group = app_commands.Group(name=COMMAND_NAME, description="Audio hardware 
 # =========================================================================
 # 2. PERSISTENT LOCAL FILE STATE WRAPPERS
 # =========================================================================
-def save_stream_state(guild_id: int, channel_id: int, selected_source: str = "test_signal", is_active: bool = True):
-    """Serializes absolute tracking boundaries using explicit string tokens instead of indices."""
+def save_stream_state(guild_id: int, channel_id: int, selected_source: str = "test_signal",
+                       selected_device: str = None, is_active: bool = True):
+    """Serializes absolute tracking boundaries using explicit string tokens instead of indices.
+
+    NOTE: `selected_source` (the profile "type", e.g. "usb_mic") is NOT unique when a
+    single profile fans out into multiple discovered hardware entries (e.g. 4 USB mics
+    all share type "usb_mic" but differ by `device`, e.g. plughw:0,0 vs plughw:3,0).
+    We must also persist `selected_device` so the exact hardware entry the user picked
+    can be recovered later, instead of always resolving to the first entry with a
+    matching type.
+    """
     global CURRENT_TUNED_CHANNEL, CURRENT_VOLUME_LEVEL
     try:
         os.makedirs(os.path.dirname(STATE_FILE), exist_ok=True)
@@ -77,6 +86,7 @@ def save_stream_state(guild_id: int, channel_id: int, selected_source: str = "te
             "guild_id": guild_id,
             "channel_id": channel_id,
             "selected_source": selected_source,
+            "selected_device": selected_device,
             "tuned_frequency": CURRENT_TUNED_CHANNEL,
             "volume_level": CURRENT_VOLUME_LEVEL,
             "is_active": is_active
@@ -282,17 +292,43 @@ def spawn_hardware_capture_stream(active_source):
         start_new_session=True,  # own process group, so stop_active_hardware_process() can killpg() every stage of the shell pipeline
     )
 
-async def execute_stream_pipeline(interaction: discord.Interaction, channel: discord.VoiceChannel, force_source_type: str = None):
+def resolve_active_source(detected_sources, target_source_type, target_device=None):
+    """Resolves a specific hardware entry from the cache.
+
+    A profile `type` (e.g. "usb_mic") can fan out into several distinct hardware
+    entries that only differ by `device` (e.g. plughw:0,0 vs plughw:3,0). Matching
+    on `type` alone always returns the *first* entry with that type, silently
+    collapsing every USB microphone selection onto mic 0. We match on the
+    (type, device) pair first, and only fall back to a type-only match when no
+    device was specified (or the previously-selected device is no longer present).
+    """
+    active_source = None
+    if target_device is not None:
+        active_source = next(
+            (s for s in detected_sources
+             if s["type"] == target_source_type and s.get("device") == target_device),
+            None
+        )
+    if active_source is None:
+        active_source = next((s for s in detected_sources if s["type"] == target_source_type), None)
+    if active_source is None:
+        active_source = detected_sources[0] if detected_sources else {"type": "test_signal", "description": "Diagnostic Fallback"}
+    return active_source
+
+async def execute_stream_pipeline(interaction: discord.Interaction, channel: discord.VoiceChannel,
+                                   force_source_type: str = None, force_device: str = None):
     """Binds the voice client loop to our continuous filesystem FIFO stream handle, using string keys."""
     global CURRENT_TUNED_CHANNEL, CURRENT_VOLUME_LEVEL
     target_source_type = "test_signal"
-    
+    target_device = None
+
     if os.path.exists(STATE_FILE):
         try:
             with open(STATE_FILE, 'r') as f:
                 saved_data = json.load(f)
             if "selected_source" in saved_data:
                 target_source_type = saved_data["selected_source"]
+            target_device = saved_data.get("selected_device")
             if "tuned_frequency" in saved_data:
                 CURRENT_TUNED_CHANNEL = saved_data["tuned_frequency"]
             if "volume_level" in saved_data:
@@ -302,6 +338,7 @@ async def execute_stream_pipeline(interaction: discord.Interaction, channel: dis
 
     if force_source_type is not None:
         target_source_type = force_source_type
+        target_device = force_device
 
     if not os.path.exists(SOURCES_CACHE_FILE):
         discover_hardware_profile()
@@ -309,10 +346,8 @@ async def execute_stream_pipeline(interaction: discord.Interaction, channel: dis
     try:
         with open(SOURCES_CACHE_FILE, 'r') as f:
             detected_sources = json.load(f)
-        
-        active_source = next((s for s in detected_sources if s["type"] == target_source_type), None)
-        if active_source is None:
-            active_source = detected_sources[0] if detected_sources else {"type": "test_signal", "description": "Diagnostic Fallback"}
+
+        active_source = resolve_active_source(detected_sources, target_source_type, target_device)
     except Exception:
         await interaction.followup.send("❌ Data engine error. Rebuild profiles using `/radio list`.")
         return
@@ -332,7 +367,8 @@ async def execute_stream_pipeline(interaction: discord.Interaction, channel: dis
             transformer = discord.PCMVolumeTransformer(audio_stream, volume=CURRENT_VOLUME_LEVEL)
             vc.play(transformer)
         
-        save_stream_state(interaction.guild.id, channel.id, active_source["type"], is_active=True)
+        save_stream_state(interaction.guild.id, channel.id, active_source["type"],
+                           selected_device=active_source.get("device"), is_active=True)
         await interaction.followup.send(f"🎙️ Connected! Stream type: **{active_source['description']}**.")
     except Exception as e:
         await interaction.followup.send(f"❌ Failed initializing device link pipeline: {e}")
@@ -380,13 +416,17 @@ async def volume(interaction: discord.Interaction, percentage: int):
     CURRENT_VOLUME_LEVEL = target_volume
     
     current_source_type = "test_signal"
+    current_device = None
     try:
         if os.path.exists(STATE_FILE):
             with open(STATE_FILE, 'r') as f:
-                current_source_type = json.load(f).get("selected_source", "test_signal")
+                saved_data = json.load(f)
+            current_source_type = saved_data.get("selected_source", "test_signal")
+            current_device = saved_data.get("selected_device")
     except Exception: pass
     
-    save_stream_state(interaction.guild.id, vc.channel.id, current_source_type, is_active=True)
+    save_stream_state(interaction.guild.id, vc.channel.id, current_source_type,
+                       selected_device=current_device, is_active=True)
     await interaction.response.send_message(f"🔊 Dynamic playback volume adjusted and saved to **{percentage}%**.")
 
 # =========================================================================
@@ -429,17 +469,20 @@ async def set_input(interaction: discord.Interaction, index: int):
         return
 
     target_source_type = sources[index]["type"]
+    target_device = sources[index].get("device")
     vc = interaction.guild.voice_client
     guild_id = interaction.guild.id if vc else 0
     channel_id = vc.channel.id if vc else 0
 
-    save_stream_state(guild_id, channel_id, target_source_type, is_active=(vc is not None))
+    save_stream_state(guild_id, channel_id, target_source_type,
+                       selected_device=target_device, is_active=(vc is not None))
 
     if vc and vc.is_connected():
         await interaction.response.defer(ephemeral=True)
-        await execute_stream_pipeline(interaction, vc.channel, force_source_type=target_source_type)
+        await execute_stream_pipeline(interaction, vc.channel, force_source_type=target_source_type,
+                                       force_device=target_device)
     else:
-        await interaction.response.send_message(f"✅ Target capture source locked to configuration file token: **{target_source_type}**.")
+        await interaction.response.send_message(f"✅ Target capture source locked to configuration file token: **{sources[index]['description']}**.")
 
 @radio_group.command(name="channel", description="Tune the NESDR SMArt v5 receiver frequency channel link")
 async def tune_channel(interaction: discord.Interaction, frequency: str):
@@ -460,24 +503,31 @@ async def tune_channel(interaction: discord.Interaction, frequency: str):
         await interaction.response.defer(ephemeral=True)
         
         current_source_type = "test_signal"
+        current_device = None
         try:
             if os.path.exists(STATE_FILE):
                 with open(STATE_FILE, 'r') as f:
-                    current_source_type = json.load(f).get("selected_source", "test_signal")
+                    saved_data = json.load(f)
+                current_source_type = saved_data.get("selected_source", "test_signal")
+                current_device = saved_data.get("selected_device")
         except Exception:
             pass
 
-        save_stream_state(interaction.guild.id, vc.channel.id, current_source_type, is_active=True)
-        await execute_stream_pipeline(interaction, vc.channel, force_source_type=current_source_type)
+        save_stream_state(interaction.guild.id, vc.channel.id, current_source_type,
+                           selected_device=current_device, is_active=True)
+        await execute_stream_pipeline(interaction, vc.channel, force_source_type=current_source_type,
+                                       force_device=current_device)
     else:
         current_source_type = "test_signal"
+        current_device = None
         if os.path.exists(STATE_FILE):
             try:
-                
                 with open(STATE_FILE, 'r') as f:
-                    current_source_type = json.load(f).get("selected_source", "test_signal")
+                    saved_data = json.load(f)
+                current_source_type = saved_data.get("selected_source", "test_signal")
+                current_device = saved_data.get("selected_device")
             except Exception: pass
-        save_stream_state(0, 0, current_source_type, is_active=False)
+        save_stream_state(0, 0, current_source_type, selected_device=current_device, is_active=False)
         await interaction.response.send_message(f"📡 Tuner frequency baseline channel set to **{clean_freq}** for next SDR stream run.")
 # =========================================================================
 # 6. TIMED OPERATION SCHEDULERS (SLEEP / WAKE ENGINE)
@@ -614,6 +664,7 @@ async def on_ready():
             CURRENT_VOLUME_LEVEL = data["volume_level"]
 
         current_source_type = data.get("selected_source", "test_signal")
+        current_device = data.get("selected_device")
 
         if not data.get("is_active", True):
             print(f"🔄 [Recovery] Found dormant profile configuration parameters. Caching source token {current_source_type}, baseline {CURRENT_TUNED_CHANNEL} without auto-connecting.")
@@ -643,7 +694,8 @@ async def on_ready():
                 async def send(content): print(f"📢 [Recovery Notice] {content}")
 
         fake_interaction = SynthesizedInteraction(channel.guild, channel)
-        await execute_stream_pipeline(fake_interaction, channel, force_source_type=current_source_type)
+        await execute_stream_pipeline(fake_interaction, channel, force_source_type=current_source_type,
+                                       force_device=current_device)
         print("🔄 [Recovery] State resume completed successfully.")
     except Exception as e:
         print(f"❌ [Recovery] Internal failure processing recovery routine payload: {e}")
@@ -651,4 +703,3 @@ async def on_ready():
 
 if __name__ == "__main__":
     bot.run(DISCORD_TOKEN)
-
