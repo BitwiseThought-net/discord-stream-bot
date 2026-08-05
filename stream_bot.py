@@ -4,7 +4,10 @@ import json
 import asyncio
 import re
 import signal
+import shutil
+import array
 import subprocess
+from typing import Optional
 from datetime import datetime, timedelta
 import discord
 from discord import app_commands
@@ -221,6 +224,76 @@ def discover_hardware_profile():
         print(f"⚠️ Failed writing data cache map layout properties: {e}")
 
     return available_sources
+
+def probe_device_has_signal(device: str, duration: float = 0.3, rms_threshold: float = 50.0):
+    """Records a short raw snippet directly from an ALSA capture device and checks for
+    non-silence via RMS amplitude. Used to auto-detect which of several identical
+    USB microphone entries is actually the one receiving live audio, since vendor
+    ID / card index alone can't distinguish between otherwise-identical hardware.
+
+    Returns a (status, detail) tuple instead of a bare bool:
+      status == "signal" : audio captured, RMS above threshold
+      status == "silent" : device opened and captured fine, RMS below threshold
+      status == "error"  : could not get a real reading at all -- device busy,
+                            arecord missing, unsupported format/rate, permission
+                            denied on /dev/snd, timeout, etc. This is NOT the same
+                            as silence: a previous version of this function caught
+                            every one of these failure modes with a blanket
+                            `except Exception: return False`, which made a busy
+                            or misconfigured device look identical to a genuinely
+                            silent one in `/radio input` (list mode) output. Surfacing the
+                            failure mode separately lets you tell "nothing plugged
+                            in" apart from "the probe itself couldn't run."
+
+    NOTE: if the bot is *currently* streaming from this exact device via the FIFO
+    pipeline, arecord will typically fail to open it (device busy) -- that will
+    now show up explicitly as an "error" with a busy/in-use detail rather than
+    silently reporting "silent".
+    """
+    if not device or not device.startswith("plughw"):
+        return ("error", "not a probeable ALSA device")
+
+    if shutil.which("arecord") is None:
+        return ("error", "arecord not found on PATH -- install alsa-utils in the container image")
+
+    try:
+        result = subprocess.run(
+            ["arecord", "-D", device, "-f", "S16_LE", "-r", "48000",
+             "-c", "1", "-d", str(duration), "-t", "raw"],
+            capture_output=True, timeout=duration + 2.0
+        )
+    except subprocess.TimeoutExpired:
+        return ("error", "arecord timed out opening the device")
+    except Exception as e:
+        return ("error", f"failed to launch arecord: {e}")
+
+    if result.returncode != 0:
+        stderr_text = result.stderr.decode(errors="ignore").strip()
+        last_line = stderr_text.splitlines()[-1] if stderr_text else f"exit code {result.returncode}"
+        return ("error", last_line)
+
+    raw = result.stdout
+    if len(raw) < 2:
+        return ("error", "arecord exited cleanly but returned no audio bytes")
+
+    samples = array.array('h', raw[: len(raw) - (len(raw) % 2)])
+    if not samples:
+        return ("error", "empty sample buffer after capture")
+
+    rms = (sum(s * s for s in samples) / len(samples)) ** 0.5
+    if rms > rms_threshold:
+        return ("signal", f"rms={rms:.1f}")
+    return ("silent", f"rms={rms:.1f}")
+
+def scan_sources_for_signal(sources):
+    """Probes every plughw-backed source entry and returns a dict of
+    device -> (status, detail), see probe_device_has_signal for status meanings."""
+    signal_map = {}
+    for src in sources:
+        device = src.get("device", "")
+        if device.startswith("plughw"):
+            signal_map[device] = probe_device_has_signal(device)
+    return signal_map
 # =========================================================================
 # 4. BROADCAST CORE PIPELINE HANDLERS
 # =========================================================================
@@ -349,7 +422,7 @@ async def execute_stream_pipeline(interaction: discord.Interaction, channel: dis
 
         active_source = resolve_active_source(detected_sources, target_source_type, target_device)
     except Exception:
-        await interaction.followup.send("❌ Data engine error. Rebuild profiles using `/radio list`.")
+        await interaction.followup.send("❌ Data engine error. Rebuild profiles using `/radio input` with no index.")
         return
 
     try:
@@ -399,6 +472,29 @@ async def stop(interaction: discord.Interaction):
     await vc.disconnect()
     await interaction.response.send_message("🛑 Audio pipeline disconnected and device loops flushed.")
 
+@radio_group.command(name="restart", description="Power-cycle the active hardware pipeline without leaving the voice channel")
+async def restart(interaction: discord.Interaction):
+    vc = interaction.guild.voice_client
+    if not vc or not vc.is_connected():
+        await interaction.response.send_message("I'm not currently connected to a voice channel. Use `/radio start` instead.", ephemeral=True)
+        return
+
+    await interaction.response.defer(ephemeral=True)
+
+    # Kill the underlying capture pipeline (ffmpeg/rtl_fm/sox and any orphaned
+    # children via killpg -- see stop_active_hardware_process) but deliberately
+    # leave the voice connection itself alone, so listeners aren't kicked out
+    # of the channel for what's meant to be a quick pipeline bounce.
+    stop_active_hardware_process()
+    if vc.is_playing() or vc.is_paused():
+        vc.stop()
+
+    # execute_stream_pipeline re-reads the last saved source/device/frequency
+    # from STATE_FILE and re-spawns the hardware process against the voice
+    # client we already hold, so this resumes the same station rather than
+    # falling back to the test signal.
+    await execute_stream_pipeline(interaction, vc.channel)
+
 @radio_group.command(name="volume", description="Scale the volume parameters of the live stream transformer")
 async def volume(interaction: discord.Interaction, percentage: int):
     global CURRENT_VOLUME_LEVEL
@@ -432,29 +528,48 @@ async def volume(interaction: discord.Interaction, percentage: int):
 # =========================================================================
 # 5. DEVICE CATALOG SELECTION & DYNAMIC TUNING COMMANDS
 # =========================================================================
-@radio_group.command(name="list", description="Re-scan and display all available input sources to stream")
-async def list_sources(interaction: discord.Interaction):
-    await interaction.response.defer(ephemeral=False)
-    sources = discover_hardware_profile()
-    
-    response = "📡 **Available Hardware Capture Interfaces:**\n"
-    visible_count = 0
-    
-    for idx, src in enumerate(sources):
-        if src["type"] == "test_signal":
-            continue
-            
-        visible_count += 1
-        response += f"`{idx}` : {src['description']}\n"
-    
-    if visible_count == 0:
-        response += "⚠️ *No physical audio hardware interfaces detected on this station. Falling back to internal system loops.*\n"
-    await interaction.followup.send(response)
+@radio_group.command(name="input", description="List available sources (no index), or switch the active capture interface by catalog index")
+@app_commands.describe(index="Catalog index to switch to. Omit this to re-scan and list all available sources instead.")
+async def set_input(interaction: discord.Interaction, index: Optional[int] = None):
+    if index is None:
+        # ---- LIST MODE: re-scan hardware and display the catalog (formerly /radio list) ----
+        await interaction.response.defer(ephemeral=False)
+        sources = discover_hardware_profile()
+        signal_map = scan_sources_for_signal(sources)
 
-@radio_group.command(name="input", description="Switch the current capture interface using its catalog index")
-async def set_input(interaction: discord.Interaction, index: int):
+        response = "📡 **Available Hardware Capture Interfaces:**\n"
+        visible_count = 0
+        error_count = 0
+
+        for idx, src in enumerate(sources):
+            if src["type"] == "test_signal":
+                continue
+
+            visible_count += 1
+            device = src.get("device", "")
+            line = f"`{idx}` : {src['description']}"
+            if device in signal_map:
+                status, detail = signal_map[device]
+                if status == "signal":
+                    line += f" - 🟢 signal detected ({detail})"
+                elif status == "silent":
+                    line += f" - ⚪ no signal ({detail})"
+                elif status == "error":
+                    line += f" - ⚠️ probe error: {detail}"
+                    error_count += 1
+            response += line + "\n"
+
+        if visible_count == 0:
+            response += "⚠️ *No physical audio hardware interfaces detected on this station. Falling back to internal system loops.*\n"
+        elif error_count > 0:
+            response += f"\n⚠️ *{error_count} probe(s) failed to get a real reading, treat those as unknown, not confirmed silent. See the error detail per line.*"
+        response += "\n*Run `/radio input <index>` to switch to one of these sources.*"
+        await interaction.followup.send(response)
+        return
+
+    # ---- SWITCH MODE: an index was supplied, so pick that source (formerly /radio input <index>) ----
     if not os.path.exists(SOURCES_CACHE_FILE):
-        await interaction.response.send_message("❌ Error: Device catalog not initialized. Please run `/radio list` first.", ephemeral=True)
+        await interaction.response.send_message("❌ Error: Device catalog not initialized. Run `/radio input` with no index to scan first.", ephemeral=True)
         return
 
     try:
@@ -483,6 +598,53 @@ async def set_input(interaction: discord.Interaction, index: int):
                                        force_device=target_device)
     else:
         await interaction.response.send_message(f"✅ Target capture source locked to configuration file token: **{sources[index]['description']}**.")
+
+@radio_group.command(name="auto", description="Auto-detect and connect to whichever USB microphone is receiving live signal")
+async def auto_input(interaction: discord.Interaction):
+    if not interaction.user.voice or not interaction.user.voice.channel:
+        await interaction.response.send_message("You must be in a voice channel to auto-detect and start streaming!", ephemeral=True)
+        return
+
+    await interaction.response.defer(ephemeral=False)
+
+    sources = discover_hardware_profile()
+    mic_sources = [s for s in sources if s.get("device", "").startswith("plughw")]
+
+    if not mic_sources:
+        await interaction.followup.send("⚠️ No USB microphone interfaces detected to scan.")
+        return
+
+    await interaction.followup.send(f"🔎 Probing {len(mic_sources)} microphone interface(s) for live signal...")
+
+    live_source = None
+    probe_errors = []
+    for src in mic_sources:
+        status, detail = probe_device_has_signal(src["device"])
+        if status == "signal":
+            live_source = src
+            break
+        if status == "error":
+            probe_errors.append(f"{src['device']}: {detail}")
+
+    if live_source is None:
+        msg = "⚪ No live signal detected on any USB microphone. Leaving current source unchanged."
+        if probe_errors:
+            msg += "\n⚠️ Some probes couldn't get a real reading (treat as unknown, not silent):\n" + "\n".join(probe_errors)
+        await interaction.followup.send(msg)
+        return
+
+    channel = interaction.user.voice.channel
+    fake_followup = interaction.followup
+
+    class AutoInteractionProxy:
+        """Reuses execute_stream_pipeline's followup.send without deferring twice."""
+        def __init__(self, guild, followup):
+            self.guild = guild
+            self.followup = followup
+
+    proxy = AutoInteractionProxy(interaction.guild, fake_followup)
+    await execute_stream_pipeline(proxy, channel, force_source_type=live_source["type"],
+                                   force_device=live_source["device"])
 
 @radio_group.command(name="channel", description="Tune the NESDR SMArt v5 receiver frequency channel link")
 async def tune_channel(interaction: discord.Interaction, frequency: str):
