@@ -28,7 +28,7 @@ WORKDIR /app
 
 # Install Python requirements including PyNaCl, encryption tools, and davey protocol layers
 RUN pip install --no-cache-dir --upgrade pip && \
-    pip install --no-cache-dir discord.py PyNaCl davey pytest pytest-cov
+    pip install --no-cache-dir discord.py PyNaCl davey pytest pytest-cov numpy
 
 # Copy the application repository files into the image workspace layer
 COPY . .
