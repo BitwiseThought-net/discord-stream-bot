@@ -140,7 +140,7 @@ def load_matrix_source_profiles():
     """Reads profile files from /sources with purely read-only permissions, executing self-healing first."""
     self_heal_test_signal_profile()
     profiles = {}
-    
+
     for filename in sorted(os.listdir(SOURCES_DIR)):
         if filename.endswith(".json"):
             try:
@@ -180,9 +180,9 @@ def discover_hardware_profile():
     for s_type, config in matrix_profiles.items():
         if s_type == "test_signal":
             continue  # Already locked to position 0
-            
+
         trigger = config.get("discovery_trigger", "")
-        
+
         # 1. ALSA PROBE GATES
         if trigger == "alsa_sound_card" and os.path.exists(base_dir):
             try:
@@ -210,7 +210,7 @@ def discover_hardware_profile():
                     })
             except Exception as e:
                 print(f"⚠️ ALSA file matrix scan exception: {e}")
-        
+
         # 2. SDR PROBE GATES
         elif trigger.startswith("usb_chipset_"):
             target_id = trigger.replace("usb_chipset_", "").lower()
@@ -445,7 +445,7 @@ async def execute_stream_pipeline(interaction: discord.Interaction, channel: dis
             )
             transformer = discord.PCMVolumeTransformer(audio_stream, volume=CURRENT_VOLUME_LEVEL)
             vc.play(transformer)
-        
+
         save_stream_state(interaction.guild.id, channel.id, active_source["type"],
                            selected_device=active_source.get("device"), is_active=True)
         await interaction.followup.send(f"🎙️ Connected! Stream type: **{active_source['description']}**.")
@@ -474,7 +474,7 @@ async def stop(interaction: discord.Interaction):
 
     stop_active_hardware_process()
     clear_stream_state()
-    
+
     await vc.disconnect()
     await interaction.response.send_message("🛑 Audio pipeline disconnected and device loops flushed.")
 
@@ -516,7 +516,7 @@ async def volume(interaction: discord.Interaction, percentage: int):
     target_volume = max(0.0, min(float(percentage) / 100.0, 2.0))
     vc.source.volume = target_volume
     CURRENT_VOLUME_LEVEL = target_volume
-    
+
     current_source_type = "test_signal"
     current_device = None
     try:
@@ -526,7 +526,7 @@ async def volume(interaction: discord.Interaction, percentage: int):
             current_source_type = saved_data.get("selected_source", "test_signal")
             current_device = saved_data.get("selected_device")
     except Exception: pass
-    
+
     save_stream_state(interaction.guild.id, vc.channel.id, current_source_type,
                        selected_device=current_device, is_active=True)
     await interaction.response.send_message(f"🔊 Dynamic playback volume adjusted and saved to **{percentage}%**.")
@@ -557,11 +557,11 @@ async def set_input(interaction: discord.Interaction, index: Optional[int] = Non
             if device in signal_map:
                 status, detail = signal_map[device]
                 if status == "signal":
-                    line += f" - 🟢 signal detected ({detail})"
+                    line += f": 🟢 signal detected ({detail})"
                 elif status == "silent":
-                    line += f" - ⚪ no signal ({detail})"
+                    line += f": ⚪ no signal ({detail})"
                 elif status == "error":
-                    line += f" - ⚠️ probe error: {detail}"
+                    line += f": 🟡 probe error: {detail}"
                     error_count += 1
             response += line + "\n"
 
@@ -667,7 +667,7 @@ async def tune_channel(interaction: discord.Interaction, frequency: str):
         return
 
     clean_freq = frequency.strip().upper()
-    
+
     if clean_freq.isdigit() or re.match(r'^\d+\.\d+$', clean_freq):
         clean_freq += "M"
 
@@ -677,10 +677,10 @@ async def tune_channel(interaction: discord.Interaction, frequency: str):
 
     CURRENT_TUNED_CHANNEL = clean_freq
     vc = interaction.guild.voice_client
-    
+
     if vc and vc.is_connected():
         await interaction.response.defer(ephemeral=True)
-        
+
         current_source_type = "test_signal"
         current_device = None
         try:
@@ -824,7 +824,7 @@ async def wake(interaction: discord.Interaction, duration: str):
 async def on_ready():
     global CURRENT_TUNED_CHANNEL, CURRENT_VOLUME_LEVEL
     print(f"🤖 Automated profile online. Logged in as: {bot.user.name}")
-    
+
     if RECOVERY_MODE == "stay_disconnected":
         print("🔄 [Recovery] Stay disconnected policy enforced. Skipping historical trace loops.")
         return
@@ -836,7 +836,7 @@ async def on_ready():
     try:
         with open(STATE_FILE, 'r') as f:
             data = json.load(f)
-        
+
         if "tuned_frequency" in data:
             CURRENT_TUNED_CHANNEL = data["tuned_frequency"]
         if "volume_level" in data:
@@ -859,7 +859,7 @@ async def on_ready():
             return
 
         print(f"🔄 [Recovery] Resuming broadcast on target channel map: {channel.name} using engine token: {current_source_type}")
-        
+
         class SynthesizedInteraction:
             def __init__(self, g, ch):
                 self.guild = g
