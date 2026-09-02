@@ -1,12 +1,10 @@
-# Discord Stream Bot
-
-A lightweight, containerized Discord bot built for Linux environments (including compact single-board systems like the Raspberry Pi). This bot captures a continuous, live hardware audio feed from your computer's line-in or microphone interface and streams it directly into a Discord voice channel with minimal latency using modern native slash commands.
-
----
-
 [![Tests](https://github.com/BitwiseThought-net/discord-stream-bot/actions/workflows/tests-python.yml/badge.svg)](https://github.com/BitwiseThought-net/discord-stream-bot/actions/workflows/tests-python.yml)
 [![Coverage](https://raw.githubusercontent.com/BitwiseThought-net/discord-stream-bot/main/badges/coverage-badge.svg)](https://github.com/BitwiseThought-net/discord-stream-bot/actions/workflows/tests-python.yml)
 [![Tests Passing](https://raw.githubusercontent.com/BitwiseThought-net/discord-stream-bot/main/badges/tests-badge.svg)](https://github.com/BitwiseThought-net/discord-stream-bot/actions/workflows/tests-python.yml)
+
+# Discord Stream Bot
+
+A lightweight, containerized Discord bot built for Linux environments (including compact single-board systems like the Raspberry Pi). This bot captures a continuous, live hardware audio feed from your computer's line-in or microphone interface and streams it directly into a Discord voice channel with minimal latency using modern native slash commands.
 
 ---
 
