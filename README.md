@@ -4,9 +4,9 @@ A lightweight, containerized Discord bot built for Linux environments (including
 
 ---
 
-[![Tests](https://github.com/BitwiseThought-net/discord-stream-bot/actions/workflows/tests.yml/badge.svg)](https://github.com/BitwiseThought-net/discord-stream-bot/actions/workflows/tests.yml)
-[![Coverage](https://raw.githubusercontent.com/BitwiseThought-net/discord-stream-bot/main/badges/coverage-badge.svg)](https://github.com/BitwiseThought-net/discord-stream-bot/actions/workflows/tests.yml)
-[![Tests Passing](https://raw.githubusercontent.com/BitwiseThought-net/discord-stream-bot/main/badges/tests-badge.svg)](https://github.com/BitwiseThought-net/discord-stream-bot/actions/workflows/tests.yml)
+[![Tests](https://github.com/BitwiseThought-net/discord-stream-bot/actions/workflows/tests-python.yml/badge.svg)](https://github.com/BitwiseThought-net/discord-stream-bot/actions/workflows/tests-python.yml)
+[![Coverage](https://raw.githubusercontent.com/BitwiseThought-net/discord-stream-bot/main/badges/coverage-badge.svg)](https://github.com/BitwiseThought-net/discord-stream-bot/actions/workflows/tests-python.yml)
+[![Tests Passing](https://raw.githubusercontent.com/BitwiseThought-net/discord-stream-bot/main/badges/tests-badge.svg)](https://github.com/BitwiseThought-net/discord-stream-bot/actions/workflows/tests-python.yml)
 
 ---
 
