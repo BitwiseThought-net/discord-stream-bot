@@ -49,7 +49,7 @@ jobs:
       - name: Run tests
         run: |
           pytest -q \
-            --cov=stream_bot \
+            --cov=bot \
             --cov-report=xml \
             --cov-report=term-missing \
             --cov-report=xml:coverage.xml \

@@ -37,4 +37,4 @@ COPY . .
 RUN mkdir -p /data
 
 # Run the script
-CMD ["python", "stream_bot.py"]
+CMD ["python", "bot.py"]

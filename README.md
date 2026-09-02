@@ -35,7 +35,7 @@ discord-stream-bot/
 ├── .env
 ├── docker-compose.yml
 ├── Dockerfile
-├── stream_bot.py
+├── bot.py
 └── setup.sh
 ```
 
