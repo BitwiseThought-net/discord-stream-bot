@@ -52,7 +52,7 @@ jobs:
       - name: Execute Comprehensive Test Suite
         run: |
           echo "🚀 Running test suite with strict coverage tracking..."
-          pytest --cov=stream_bot --cov-report=xml test_bot.py -v
+          pytest --cov=bot --cov-report=xml test_bot.py -v
 
       # Enforces a mandatory, breaking 70% threshold boundary block
       - name: Publish Code Coverage Summary
