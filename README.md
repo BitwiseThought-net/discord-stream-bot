@@ -2,6 +2,14 @@
 
 A lightweight, containerized Discord bot built for Linux environments (including compact single-board systems like the Raspberry Pi). This bot captures a continuous, live hardware audio feed from your computer's line-in or microphone interface and streams it directly into a Discord voice channel with minimal latency using modern native slash commands.
 
+---
+
+[![Tests](https://github.com/BitwiseThought-net/discord-stream-bot/actions/workflows/tests.yml/badge.svg)](https://github.com/BitwiseThought-net/discord-stream-bot/actions/workflows/tests.yml)
+[![Coverage](https://raw.githubusercontent.com/BitwiseThought-net/discord-stream-bot/main/badges/coverage-badge.svg)](https://github.com/BitwiseThought-net/discord-stream-bot/actions/workflows/tests.yml)
+[![Tests Passing](https://raw.githubusercontent.com/BitwiseThought-net/discord-stream-bot/main/badges/tests-badge.svg)](https://github.com/BitwiseThought-net/discord-stream-bot/actions/workflows/tests.yml)
+
+---
+
 ## Key Features
 * 🐳 **Fully Containerized:** Uses Docker and Docker Compose for a clean, zero-pollution setup on your host OS.
 * 🔄 **Auto-Start on Boot:** Configured to instantly spin up and reconnect if the host environment restarts or loses power.
