@@ -1,4 +1,3 @@
 #!/bin/bash
 
-docker compose exec discord-bot pytest test_bot.py -v
-
+docker compose exec discord-bot pytest tests/test_bot.py -v

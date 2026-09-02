@@ -7,8 +7,9 @@ import importlib
 from unittest.mock import patch, mock_open, MagicMock, AsyncMock
 from datetime import datetime, timedelta
 
-# Ensure local repository directory has absolute path priority
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+# Ensure the project root (where stream_bot.py lives, one level up from
+# this tests/ folder) has absolute path priority
+BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if BASE_DIR not in sys.path:
     sys.path.insert(0, BASE_DIR)
 
@@ -347,4 +348,3 @@ class TestDiscordStreamBotFullCoverage(unittest.IsolatedAsyncioTestCase):
 
 if __name__ == '__main__':
     unittest.main()
-
