@@ -26,10 +26,11 @@ DISCORD_TOKEN = os.getenv('DISCORD_TOKEN')
 COMMAND_NAME = os.getenv('COMMAND_BASE', 'radio')
 RECOVERY_MODE = os.getenv('RECOVERY_MODE', 'resume')
 
-STATE_FILE = "/data/state.json"
-SOURCES_CACHE_FILE = "/data/sources_cache.json"
-FIFO_PIPE = "/data/audio_pipe"      # Continuous shared audio stream buffer
-SOURCES_DIR = "/sources"            # Configuration directory holding isolated profiles
+DATA_DIR = os.getenv('DATA_DIR', '/data')
+STATE_FILE = os.getenv('STATE_FILE', os.path.join(DATA_DIR, 'state.json'))
+SOURCES_CACHE_FILE = os.getenv('SOURCES_CACHE_FILE', os.path.join(DATA_DIR, 'sources_cache.json'))
+FIFO_PIPE = os.getenv('FIFO_PIPE', os.path.join(DATA_DIR, 'audio_pipe'))      # Continuous shared audio stream buffer
+SOURCES_DIR = os.getenv('SOURCES_DIR', '/sources')            # Configuration directory holding isolated profiles
 
 CURRENT_TUNED_CHANNEL = "94.9M"
 CURRENT_VOLUME_LEVEL = 1.0          # Global persistent tracking memory register for volume level
