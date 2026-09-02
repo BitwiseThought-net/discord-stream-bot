@@ -1,6 +1,6 @@
 [![Tests](https://github.com/BitwiseThought-net/discord-stream-bot/actions/workflows/tests-python.yml/badge.svg)](https://github.com/BitwiseThought-net/discord-stream-bot/actions/workflows/tests-python.yml)
-[![Coverage](https://raw.githubusercontent.com/BitwiseThought-net/discord-stream-bot/main/badges/coverage-badge.svg)](https://github.com/BitwiseThought-net/discord-stream-bot/actions/workflows/tests-python.yml)
-[![Tests Passing](https://raw.githubusercontent.com/BitwiseThought-net/discord-stream-bot/main/badges/tests-badge.svg)](https://github.com/BitwiseThought-net/discord-stream-bot/actions/workflows/tests-python.yml)
+[![Coverage](https://raw.githubusercontent.com/BitwiseThought-net/discord-stream-bot/refs/heads/main/badges/coverage-badge.svg)](https://github.com/BitwiseThought-net/discord-stream-bot/actions/workflows/tests-python.yml)
+[![Tests Passing](https://raw.githubusercontent.com/BitwiseThought-net/discord-stream-bot/refs/heads/main/badges/tests-badge.svg)](https://github.com/BitwiseThought-net/discord-stream-bot/actions/workflows/tests-python.yml)
 
 # Discord Stream Bot
 
