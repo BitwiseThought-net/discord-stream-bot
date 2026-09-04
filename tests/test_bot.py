@@ -60,11 +60,11 @@ class TestParseDurationToSeconds:
     @pytest.mark.parametrize(
         "input_str,target_hour,expected_hour",
         [
-            ("12:00am", 0),
-            ("12:00pm", 12),
-            ("1:00am", 1),
-            ("1:00pm", 13),
-            ("11:59pm", 23),
+            ("12:00am", 0, 0),
+            ("12:00pm", 12, 12),
+            ("1:00am", 1, 1),
+            ("1:00pm", 13, 19),
+            ("11:59pm", 23, 23),
         ],
     )
     def test_absolute_time_am_pm(self, input_str, target_hour, expected_hour):

@@ -1,0 +1,4 @@
+<?xml version="1.0" encoding="utf-8"?><testsuites name="pytest tests"><testsuite name="pytest" errors="1" failures="0" skipped="0" tests="1" time="0.182" timestamp="2026-09-03T22:33:03.339110-07:00" hostname="BitwiseTower"><testcase classname="tests.test_bot" name="TestParseDurationToSeconds" time="0.000"><error message="collection failure">tests/test_bot.py::TestParseDurationToSeconds::test_absolute_time_am_pm: in "parametrize" the number of names (3):
+  ['input_str', 'target_hour', 'expected_hour']
+must be equal to the number of values (2):
+  ('12:00am', 0)</error></testcase></testsuite></testsuites>
