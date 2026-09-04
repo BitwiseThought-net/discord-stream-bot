@@ -11,8 +11,14 @@ isolated temp dir with all required env vars set.
 
 import os
 import shutil
+import sys
 import tempfile
 from pathlib import Path
+
+# -- add project root to sys.path so `import bot` works from tests/ ------------
+BASE_DIR = str(Path(__file__).parent.parent)
+if BASE_DIR not in sys.path:
+    sys.path.insert(0, BASE_DIR)
 
 # Module-level constant used at module load to build the fake FIFO pipe.
 # The fixture below *also* sets these env vars, so both paths work:
