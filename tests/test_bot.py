@@ -86,18 +86,18 @@ class TestParseDurationToSeconds:
 
     def test_absolute_time_past_today(self):
         """When target is earlier than now, should schedule for tomorrow."""
-        past = datetime.now().replace(hour=6, minute=0, second=0, microsecond=0)
-        with patch("bot.datetime", wraps=datetime) as mock_dt:
+        past = datetime.now().replace(hour=22, minute=0, second=0, microsecond=0)
+        with patch.object(bot, 'datetime', wraps=datetime) as mock_dt:
             real_datetime = datetime
 
             def side_effect(*args, **kw):
                 if args or kw:
                     return real_datetime(*args, **kw)
-                return past  # 'now' is already past 6am
+                return past  # 'now' is 22:00, target 08:00 → tomorrow
 
             mock_dt.now.side_effect = side_effect
             result = bot.parse_duration_to_seconds("08:00")
-        assert result > 3600 * 14  # at least ~14h away
+        assert 4 * 3600 < result < 22 * 3600  # ~10h away
 
     def test_absolute_time_with_am_noon(self):
         """12am should become hour=0."""
