@@ -7,6 +7,7 @@ import signal
 import shutil
 import array
 import subprocess
+import time
 from typing import Optional
 from datetime import datetime, timedelta
 import discord
@@ -67,6 +68,8 @@ class StreamBotClient(discord.Client):
         self.hardware_process = None
         self.sox_process = None
         self.ffmpeg_process = None
+        self.compose_stack_file: str | None = None    # temp docker-compose YAML path
+        self.compose_reader_process: subprocess.Popen | None = None  # tail|ffmpeg bridge process
 
     async def setup_hook(self):
         self.tree.add_command(radio_group)
@@ -74,6 +77,22 @@ class StreamBotClient(discord.Client):
 
 bot = StreamBotClient()
 radio_group = app_commands.Group(name=COMMAND_NAME, description="Audio hardware and SDR streaming matrix controls")
+
+
+# =========================================================================
+# 3. HOST ARCHITECTURE DETECTION (ARM vs x86_64)
+# =========================================================================
+def _detect_host_architecture() -> str:
+    """Return ``arm64`` or ``x86_64`` for Android container image selection."""
+    import platform
+    try:
+        machine = platform.machine().lower()
+        if machine.startswith("a"):  # aarch64, armv7l, etc.
+            return "arm64"
+    except Exception:
+        pass
+    return "x86_64"
+
 
 # =========================================================================
 # 2. PERSISTENT LOCAL FILE STATE WRAPPERS
@@ -322,6 +341,47 @@ def stop_active_hardware_process():
     group (start_new_session=True). Here we signal the whole group with
     os.killpg(), which reaches the shell AND every child it forked.
     """
+    # Tear down any docker-compose stack first (Android emulator source)
+    if getattr(bot, 'compose_stack_file', None):
+        try:
+            subprocess.run(
+                ["docker", "compose", "-f", bot.compose_stack_file, "down", "--timeout", "3"],
+                capture_output=True
+            )
+        except Exception:
+            try:
+                subprocess.run(
+                    ["docker-compose", "-f", bot.compose_stack_file, "down", "--timeout", "3"],
+                    capture_output=True
+                )
+            except Exception:
+                pass
+        finally:
+            try:
+                os.unlink(bot.compose_stack_file)
+            except FileNotFoundError:
+                pass
+            bot.compose_stack_file = None
+
+    # Also kill any compose reader (tail+ffmpeg bridge) process
+    reader = getattr(bot, 'compose_reader_process', None)
+    if reader is not None:
+        try:
+            pgid = os.getpgid(reader.pid)
+            os.killpg(pgid, signal.SIGTERM)
+            reader.wait(timeout=1.0)
+        except Exception:
+            try:
+                os.killpg(os.getpgid(reader.pid), signal.SIGKILL)
+                reader.wait(timeout=1.0)
+            except Exception:
+                try:
+                    reader.kill()
+                except Exception:
+                    pass
+        finally:
+            bot.compose_reader_process = None
+
     for proc_attr in ['ffmpeg_process', 'sox_process', 'hardware_process']:
         proc = getattr(bot, proc_attr)
         if proc is not None:
@@ -340,12 +400,119 @@ def stop_active_hardware_process():
                         pass
             setattr(bot, proc_attr, None)
 
+
+# =========================================================================
+# 4. DOCKER-COMPOSE-DRIVEN SOURCES (Android Emulator)
+# =========================================================================
+
+def _spawn_android_emulator_stack(active_source):
+    """Start a docker-compose stack for the Android emulator and bridge its audio to the FIFO pipe.
+
+    Works by:
+    1. Detecting host architecture to pick the correct multi-arch image.
+    2. Writing a temporary compose YAML with shared volume + VNC enabled.
+    3. Launching ``docker compose up -d`` in detached mode.
+    4. Spawning a tail+ffmpeg bridge process that reads audio PCM from the
+       shared volume and appends it to {fifo_pipe}.
+    """
+    global CURRENT_TUNED_CHANNEL
+
+    arch = _detect_host_architecture()
+    # linuxserver/android provides multi-arch images (arm64, x86_64) with VNC built-in
+    image_map = {
+        "arm64":   "linuxserver/android:armv7-x86_64",
+        "x86_64":  "linuxserver/android:armv7-x86_64",
+    }
+    image = image_map.get(arch, image_map["x86_64"])
+
+    # Shared volume mount point inside the container where Android audio is written
+    android_data_vol = "android_output"
+    host_audio_path = os.path.join("/data", "android_output", "emulator_audio.pcm")
+    # The bridge reads from this path; Android writes here via a named pipe in the shared vol.
+    reader_input = "/data/android_output/emulator_audio.pcm"
+
+    compose_yaml = f"""services:
+  android:
+    image: {image}
+    privileged: true
+    network_mode: host
+    environment:
+      - WEB_VNC=true
+      - ENABLE_VNC=no
+    volumes:
+      - {android_data_vol}:/data/android_output
+    tmpfs:
+      - /tmp
+    healthcheck:
+      test: ["CMD", "pgrep", "-f", "emulator64"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+"""
+
+    # Write temporary compose file
+    stack_path = f"/tmp/docker-compose.android.{os.getpid()}.yml"
+    with open(stack_path, "w") as f:
+        f.write(compose_yaml)
+
+    # Start the compose stack
+    result = subprocess.run(
+        ["docker", "compose", "-f", stack_path, "up", "-d"],
+        capture_output=True, text=True
+    )
+    if result.returncode != 0:
+        print(f"❌ [Docker] Android emulator start failed: {result.stderr.strip()}")
+        return
+
+    bot.compose_stack_file = stack_path
+
+    # Wait for container to be healthy-ish before bridging audio (~30 s timeout)
+    ready = False
+    for _ in range(60):
+        result = subprocess.run(
+            ["docker", "compose", "-f", stack_path, "ps", "--format", "{{.Status}}"],
+            capture_output=True, text=True
+        )
+        if result.returncode == 0 and "healthy" not in result.stdout and "Up" in result.stdout:
+            ready = True
+            break
+        time.sleep(0.5)
+
+    if not ready:
+        print("⚠️ [Docker] Android container did not report healthy in timeout, proceeding anyway")
+
+    # Start the audio bridge: read from shared volume → convert → pipe to FIFO
+    bridge_cmd = (
+        f"tail -f {reader_input} 2>/dev/null "
+        f"| ffmpeg -y -f s16le -ar 48000 -ac 1 -i pipe:0 "
+        f"-filter:a \"aformat=sample_fmts=s16:sample_rates=48000:channel_layouts=stereo\" "
+        f"-f s16le -ar 48k -ac 2 pipe:1 >> {FIFO_PIPE}"
+    )
+    bot.compose_reader_process = subprocess.Popen(
+        bridge_cmd,
+        shell=True,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        start_new_session=True,
+    )
+
+
 def spawn_hardware_capture_stream(active_source):
-    """Parses shell parameters dynamically from separate JSON profiles and spawns arrays."""
+    """Parses shell parameters dynamically from separate JSON profiles and spawns arrays.
+
+    Sources with ``pipeline_type: "docker_compose"`` (e.g. Android emulator) are
+    delegated to ``_spawn_android_emulator_stack`` instead of the standard pipeline path.
+    """
     global CURRENT_TUNED_CHANNEL
     s_type = active_source["type"]
+    pipeline_type = active_source.get("pipeline_type", "default")
 
     stop_active_hardware_process()
+
+    # Dispatch docker-compose-based sources early
+    if pipeline_type == "docker_compose":
+        _spawn_android_emulator_stack(active_source)
+        return
 
     matrix_profiles = load_matrix_source_profiles()
     if s_type not in matrix_profiles:

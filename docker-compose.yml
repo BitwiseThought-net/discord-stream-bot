@@ -12,10 +12,12 @@ services:
     volumes:
       - discord_bot_data:/data
       - ./sources:/sources:ro
+      - /var/run/docker.sock:/var/run/docker.sock
     devices:
       - "/dev/bus/usb:/dev/bus/usb"
       - "/dev/snd:/dev/snd"
 
 volumes:
   discord_bot_data:
+  android_output:
     name: discord_bot_data

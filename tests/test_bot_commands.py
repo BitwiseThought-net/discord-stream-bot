@@ -368,6 +368,25 @@ class TestSpawnHardwareCaptureStream:
             bot.spawn_hardware_capture_stream({"type": "usb_mic"})
         mock_stop.assert_called_once()
 
+    def test_docker_compose_dispatch_calls_android_stack(self):
+        """pipeline_type: docker_compose delegates to _spawn_android_emulator_stack."""
+        profiles = {
+            "android_emulator": {"pipeline_template": "", "discovery_trigger": "always_available"}
+        }
+        fake_popen = MagicMock()
+        with patch.object(bot, "load_matrix_source_profiles", return_value=profiles), \
+             patch.object(bot, "stop_active_hardware_process"), \
+             patch("bot.subprocess.Popen", return_value=fake_popen) as mock_popen, \
+             patch("bot.FIFO_PIPE", "/tmp/fake_pipe"):
+            bot.spawn_hardware_capture_stream({
+                "type": "android_emulator",
+                "pipeline_type": "docker_compose"
+            })
+        # Must NOT use regular subprocess.Popen (no pipeline_template)
+        mock_popen.assert_not_called()
+        # Must have created a compose file on the bot object
+        assert hasattr(bot, "compose_stack_file") and bot.compose_stack_file is not None
+
 
 # ======================================================================
 # execute_stream_pipeline
