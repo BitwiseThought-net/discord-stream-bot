@@ -87,7 +87,7 @@ def _detect_host_architecture() -> str:
     import platform
     try:
         machine = platform.machine().lower()
-        if machine.startswith("a"):  # aarch64, armv7l, etc.
+        if machine in ("aarch64", "armv7l", "armv8l"):
             return "arm64"
     except Exception:
         pass
@@ -354,8 +354,8 @@ def stop_active_hardware_process():
                     ["docker-compose", "-f", bot.compose_stack_file, "down", "--timeout", "3"],
                     capture_output=True
                 )
-            except Exception:
-                pass
+            except Exception as e:
+                print(f"⚠️ [Docker] docker-compose down failed: {e}")
         finally:
             try:
                 os.unlink(bot.compose_stack_file)
@@ -415,20 +415,15 @@ def _spawn_android_emulator_stack(active_source):
     4. Spawning a tail+ffmpeg bridge process that reads audio PCM from the
        shared volume and appends it to {fifo_pipe}.
     """
-    global CURRENT_TUNED_CHANNEL
-
     arch = _detect_host_architecture()
-    # linuxserver/android provides multi-arch images (arm64, x86_64) with VNC built-in
     image_map = {
-        "arm64":   "linuxserver/android:armv7-x86_64",
-        "x86_64":  "linuxserver/android:armv7-x86_64",
+        "arm64":  "linuxserver/android:armv7-x86_64",
+        "x86_64": "linuxserver/android:armv7-x86_64",
     }
     image = image_map.get(arch, image_map["x86_64"])
 
     # Shared volume mount point inside the container where Android audio is written
     android_data_vol = "android_output"
-    host_audio_path = os.path.join("/data", "android_output", "emulator_audio.pcm")
-    # The bridge reads from this path; Android writes here via a named pipe in the shared vol.
     reader_input = "/data/android_output/emulator_audio.pcm"
 
     compose_yaml = f"""services:
@@ -473,7 +468,7 @@ def _spawn_android_emulator_stack(active_source):
             ["docker", "compose", "-f", stack_path, "ps", "--format", "{{.Status}}"],
             capture_output=True, text=True
         )
-        if result.returncode == 0 and "healthy" not in result.stdout and "Up" in result.stdout:
+        if result.returncode == 0 and ("healthy" in result.stdout or "Up (health: starting)" in result.stdout):
             ready = True
             break
         time.sleep(0.5)
