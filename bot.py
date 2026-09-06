@@ -7,8 +7,6 @@ import signal
 import shutil
 import array
 import subprocess
-import secrets
-import time
 from typing import Optional
 from datetime import datetime, timedelta
 import discord
@@ -33,18 +31,6 @@ STATE_FILE = os.getenv('STATE_FILE', os.path.join(DATA_DIR, 'state.json'))
 SOURCES_CACHE_FILE = os.getenv('SOURCES_CACHE_FILE', os.path.join(DATA_DIR, 'sources_cache.json'))
 FIFO_PIPE = os.getenv('FIFO_PIPE', os.path.join(DATA_DIR, 'audio_pipe'))      # Continuous shared audio stream buffer
 SOURCES_DIR = os.getenv('SOURCES_DIR', '/sources')            # Configuration directory holding isolated profiles
-
-# --- Android emulator source (docker_compose pipeline_type) ---
-# All optional; defaults are chosen so the source works with zero config
-# on both ARM (e.g. Raspberry Pi) and x86_64 hosts. See docs/sources.md.
-ANDROID_EMULATOR_IMAGE = os.getenv('ANDROID_EMULATOR_IMAGE', 'shmayro/dockerify-android:latest')
-ANDROID_EMULATOR_IMAGE_WEB = os.getenv('ANDROID_EMULATOR_IMAGE', 'shmayro/scrcpy-web:latest')
-ANDROID_DATA_VOLUME = os.getenv('ANDROID_DATA_VOLUME', 'android_output')
-ANDROID_STARTUP_TIMEOUT_S_OVERRIDE = os.getenv('ANDROID_STARTUP_TIMEOUT_S')
-COMPOSE_TMP_DIR = os.getenv('COMPOSE_TMP_DIR', '/tmp')
-ANDROID_WEB_VNC = os.getenv('ANDROID_WEB_VNC', 'true').lower() in ('1', 'true', 'yes')
-ANDROID_WEB_PORT = int(os.getenv('ANDROID_WEB_PORT', '3000'))
-ANDROID_WEB_HOST = os.getenv('ANDROID_WEB_HOST')  # bot can't self-detect this; set if using the web UI
 
 CURRENT_TUNED_CHANNEL = "94.9M"
 CURRENT_VOLUME_LEVEL = 1.0          # Global persistent tracking memory register for volume level
@@ -81,10 +67,6 @@ class StreamBotClient(discord.Client):
         self.hardware_process = None
         self.sox_process = None
         self.ffmpeg_process = None
-        self.compose_stack_file: str | None = None    # temp docker-compose YAML path
-        self.compose_reader_process: subprocess.Popen | None = None  # tail|ffmpeg bridge process
-        self.android_web_password: str | None = None  # per-session Android web UI password
-        self.android_web_port: int | None = None
 
     async def setup_hook(self):
         self.tree.add_command(radio_group)
@@ -92,61 +74,6 @@ class StreamBotClient(discord.Client):
 
 bot = StreamBotClient()
 radio_group = app_commands.Group(name=COMMAND_NAME, description="Audio hardware and SDR streaming matrix controls")
-
-
-# =========================================================================
-# 3. HOST ARCHITECTURE DETECTION (ARM vs x86_64)
-# =========================================================================
-def _detect_host_architecture() -> str:
-    """Return ``arm64`` or ``x86_64``.
-
-    IMPORTANT: this does NOT select a different Android image per
-    architecture -- ANDROID_EMULATOR_IMAGE intentionally uses the same tag
-    for both, on the assumption that it's a genuine multi-arch manifest
-    that Docker itself resolves correctly at pull time (the same way
-    official images like ``python:3.12`` work unmodified across amd64 and
-    arm64). The goal is a Raspberry Pi and a plain x86_64 host both working
-    with zero required configuration. This function exists to tune compose
-    *behavior* that legitimately differs by host -- KVM passthrough and
-    startup timeout -- not to pick an image.
-    """
-    import platform
-    try:
-        machine = platform.machine().lower()
-        if machine in ("aarch64", "armv7l", "armv8l"):
-            return "arm64"
-    except Exception:
-        pass
-    return "x86_64"
-
-
-def _kvm_available() -> bool:
-    """Return True if /dev/kvm exists and is read/write-accessible.
-
-    Hardware-accelerated x86 emulation needs KVM. Most Raspberry Pi hosts
-    won't have it -- the emulator image falls back to software rendering
-    in that case, which is slower but still functional. Some x86_64 hosts
-    without virtualization enabled also won't have it, so this probes
-    directly rather than assuming based on architecture alone.
-    """
-    return os.path.exists("/dev/kvm") and os.access("/dev/kvm", os.R_OK | os.W_OK)
-
-
-def _android_startup_timeout_s() -> float:
-    """Capability-aware wait time for the Android stack to report healthy.
-
-    A host without KVM (most Pi boards, and some unaccelerated x86 hosts)
-    boots the emulator meaningfully slower than an accelerated x86_64
-    host. Override with ANDROID_STARTUP_TIMEOUT_S to force a specific
-    value regardless of host capability.
-    """
-    if ANDROID_STARTUP_TIMEOUT_S_OVERRIDE:
-        try:
-            return float(ANDROID_STARTUP_TIMEOUT_S_OVERRIDE)
-        except ValueError:
-            pass
-    return 30.0 if _kvm_available() else 90.0
-
 
 # =========================================================================
 # 2. PERSISTENT LOCAL FILE STATE WRAPPERS
@@ -241,8 +168,7 @@ def discover_hardware_profile():
         "type": "test_signal",
         "device": "virtual",
         "channels": "2",
-        "description": test_config.get("description"),
-        "pipeline_type": test_config.get("pipeline_type", "default")
+        "description": test_config.get("description")
     })
 
     try:
@@ -281,8 +207,7 @@ def discover_hardware_profile():
                         "type": s_type,
                         "device": device_string,
                         "channels": channels,
-                        "description": label_template.format(device=device_string),
-                        "pipeline_type": config.get("pipeline_type", "default")
+                        "description": label_template.format(device=device_string)
                     })
             except Exception as e:
                 print(f"⚠️ ALSA file matrix scan exception: {e}")
@@ -295,23 +220,8 @@ def discover_hardware_profile():
                     "type": s_type,
                     "device": "rtlsdr",
                     "channels": "1",
-                    "description": config.get("description", f"SDR Module Channel Capture ({s_type})"),
-                    "pipeline_type": config.get("pipeline_type", "default")
+                    "description": config.get("description", f"SDR Module Channel Capture ({s_type})")
                 })
-
-        # 3. ALWAYS-AVAILABLE SOURCES (no physical hardware to probe --
-        # e.g. the Android emulator, which is backed by a container, not a
-        # device node). test_signal also uses this trigger but is already
-        # locked to index 0 above and skipped here via the `continue` at
-        # the top of this loop.
-        elif trigger == "always_available":
-            available_sources.append({
-                "type": s_type,
-                "device": config.get("device", ""),
-                "channels": config.get("channels", "2"),
-                "description": config.get("description", s_type),
-                "pipeline_type": config.get("pipeline_type", "default")
-            })
 
     try:
         os.makedirs(os.path.dirname(SOURCES_CACHE_FILE), exist_ok=True)
@@ -412,53 +322,6 @@ def stop_active_hardware_process():
     group (start_new_session=True). Here we signal the whole group with
     os.killpg(), which reaches the shell AND every child it forked.
     """
-    # Tear down any docker-compose stack first (Android emulator source).
-    # Uses subprocess.Popen (never subprocess.run) for consistency with
-    # _spawn_android_emulator_stack -- see that function's docstring.
-    if getattr(bot, 'compose_stack_file', None):
-        try:
-            down_proc = subprocess.Popen(
-                ["docker", "compose", "-f", bot.compose_stack_file, "down", "--timeout", "3"],
-                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-            )
-            down_proc.wait(timeout=10)
-            if down_proc.returncode != 0:
-                fallback_proc = subprocess.Popen(
-                    ["docker-compose", "-f", bot.compose_stack_file, "down", "--timeout", "3"],
-                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                )
-                fallback_proc.wait(timeout=10)
-        except Exception as e:
-            print(f"⚠️ [Docker] docker-compose down failed: {e}")
-        finally:
-            try:
-                os.unlink(bot.compose_stack_file)
-            except FileNotFoundError:
-                pass
-            bot.compose_stack_file = None
-            # The web UI credential dies with the stack it belongs to.
-            bot.android_web_password = None
-            bot.android_web_port = None
-
-    # Also kill any compose reader (tail+ffmpeg bridge) process
-    reader = getattr(bot, 'compose_reader_process', None)
-    if reader is not None:
-        try:
-            pgid = os.getpgid(reader.pid)
-            os.killpg(pgid, signal.SIGTERM)
-            reader.wait(timeout=1.0)
-        except Exception:
-            try:
-                os.killpg(os.getpgid(reader.pid), signal.SIGKILL)
-                reader.wait(timeout=1.0)
-            except Exception:
-                try:
-                    reader.kill()
-                except Exception:
-                    pass
-        finally:
-            bot.compose_reader_process = None
-
     for proc_attr in ['ffmpeg_process', 'sox_process', 'hardware_process']:
         proc = getattr(bot, proc_attr)
         if proc is not None:
@@ -477,172 +340,12 @@ def stop_active_hardware_process():
                         pass
             setattr(bot, proc_attr, None)
 
-
-# =========================================================================
-# 4. DOCKER-COMPOSE-DRIVEN SOURCES (Android Emulator)
-# =========================================================================
-
-def _spawn_android_emulator_stack(active_source):
-    """Start a docker-compose stack for the Android emulator and bridge its audio to the FIFO pipe.
-
-    Works by:
-    1. Probing host capability (KVM presence) to decide whether to pass
-       /dev/kvm through and how long to wait for boot -- no architecture-
-       specific configuration required on either ARM or x86_64.
-    2. Generating a fresh per-session web UI password.
-    3. Writing a temporary compose YAML with shared volume + web UI enabled.
-    4. Launching ``docker compose up -d --wait`` so Compose itself blocks
-       until the container's own healthcheck passes (or the wait times
-       out) -- this is what the container being genuinely "healthy" means,
-       rather than a hand-rolled ``docker compose ps`` polling loop.
-    5. Spawning a tail+ffmpeg bridge process that reads audio PCM from the
-       shared volume and appends it to {fifo_pipe}.
-
-    NOTE: every docker/compose call in this function goes through
-    ``subprocess.Popen`` -- never ``subprocess.run``. This is deliberate:
-    ``tests/test_bot_commands.py::TestSpawnHardwareCaptureStream::
-    test_docker_compose_dispatch_calls_android_stack`` asserts
-    ``subprocess.run`` is never called when this source is dispatched. If a
-    future edit reintroduces a ``subprocess.run`` call anywhere in this
-    function, that test failing is a real regression, not flakiness.
-    """
-    arch = _detect_host_architecture()
-    has_kvm = _kvm_available()
-    image = ANDROID_EMULATOR_IMAGE
-    image_web = ANDROID_EMULATOR_IMAGE_WEB
-
-    # Shared volume mount point inside the container where Android audio is written
-    android_data_vol = ANDROID_DATA_VOLUME
-    reader_input = "/data/android_output/emulator_audio.pcm"
-
-    # Fresh per-session credential for the built-in web UI (KasmVNC-based
-    # image). Stored on `bot` so the `android-ui` command can hand it out,
-    # and cleared automatically on teardown.
-    web_password = secrets.token_urlsafe(12)
-    bot.android_web_password = web_password
-    bot.android_web_port = ANDROID_WEB_PORT
-
-    # Pass /dev/kvm through automatically when present, omit it when it
-    # isn't -- no configuration needed on either side.
-    kvm_block = "\n    devices:\n      - /dev/kvm:/dev/kvm" if has_kvm else ""
-
-    compose_yaml = f"""services:
-  android:
-    image: {image}
-    container_name: android
-    privileged: true
-    network_mode: host
-    environment:
-      - WEB_VNC={"true" if ANDROID_WEB_VNC else "false"}
-      - ENABLE_VNC=no
-      - CUSTOM_PORT={ANDROID_WEB_PORT}
-      - PASSWORD={web_password}
-      - RAM_SIZE=2048
-      - SCREEN_RESOLUTION=1280x720
-      - SCREEN_DENSITY=227
-      - ROOT_SETUP=1
-      - GAPPS_SETUP=1
-      - ARM_TRANSLATION=1
-    volumes:
-      - {android_data_vol}:/data/android_output{kvm_block}
-      - ./data:/data
-      - ./extras:/extras
-    ports:
-      - "5555:5555"
-    devices:
-      - /dev/kvm
-    tmpfs:
-      - /tmp
-    healthcheck:
-      test: ["CMD", "pgrep", "-f", "emulator64"]
-      interval: 10s
-      timeout: 5s
-      retries: 30
-  scrcpy-web:
-    image: {image_web}
-    container_name: android-web
-    privileged: true
-    ports:
-      - "8000:8000"
-    depends_on:
-      android:
-        condition: service_healthy
-    command: >
-      sh -c "adb connect android:5555 && npm start"
-    restart: unless-stopped
-"""
-
-    # Write temporary compose file
-    stack_path = os.path.join(COMPOSE_TMP_DIR, f"docker-compose.android.{os.getpid()}.yml")
-    with open(stack_path, "w") as f:
-        f.write(compose_yaml)
-
-    # Register the stack file immediately, before we know whether startup
-    # below succeeds -- so a partially-started stack still gets torn down
-    # correctly by stop_active_hardware_process() rather than being orphaned.
-    bot.compose_stack_file = stack_path
-
-    timeout_s = _android_startup_timeout_s()
-
-    # `--wait` makes Compose itself block until the healthcheck passes (or
-    # the wait times out), replacing the previous hand-rolled polling loop
-    # -- and its bug, where a container merely "Up (health: starting)" was
-    # incorrectly treated as ready.
-    up_proc = subprocess.Popen(
-        ["docker", "compose", "-f", stack_path, "up", "-d",
-         "--wait", "--wait-timeout", str(int(timeout_s))],
-        stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True,
-    )
-    try:
-        up_proc.wait(timeout=timeout_s + 10)
-    except subprocess.TimeoutExpired:
-        up_proc.kill()
-
-    if up_proc.returncode != 0:
-        stderr_out = ""
-        try:
-            if up_proc.stderr:
-                stderr_out = up_proc.stderr.read().strip()
-        except Exception:
-            pass
-        print(
-            f"⚠️ [Docker] Android container did not report healthy within "
-            f"{timeout_s:.0f}s (arch={arch}, kvm={'yes' if has_kvm else 'no'})"
-            f"{': ' + stderr_out if stderr_out else ''}; proceeding anyway"
-        )
-
-    # Start the audio bridge: read from shared volume → convert → pipe to FIFO
-    bridge_cmd = (
-        f"tail -f {reader_input} 2>/dev/null "
-        f"| ffmpeg -y -f s16le -ar 48000 -ac 1 -i pipe:0 "
-        f"-filter:a \"aformat=sample_fmts=s16:sample_rates=48000:channel_layouts=stereo\" "
-        f"-f s16le -ar 48k -ac 2 pipe:1 >> {FIFO_PIPE}"
-    )
-    bot.compose_reader_process = subprocess.Popen(
-        bridge_cmd,
-        shell=True,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-        start_new_session=True,
-    )
-
-
 def spawn_hardware_capture_stream(active_source):
-    """Parses shell parameters dynamically from separate JSON profiles and spawns arrays.
-
-    Sources with ``pipeline_type: "docker_compose"`` (e.g. Android emulator) are
-    delegated to ``_spawn_android_emulator_stack`` instead of the standard pipeline path.
-    """
+    """Parses shell parameters dynamically from separate JSON profiles and spawns arrays."""
     global CURRENT_TUNED_CHANNEL
     s_type = active_source["type"]
-    pipeline_type = active_source.get("pipeline_type", "default")
 
     stop_active_hardware_process()
-
-    # Dispatch docker-compose-based sources early
-    if pipeline_type == "docker_compose":
-        _spawn_android_emulator_stack(active_source)
-        return
 
     matrix_profiles = load_matrix_source_profiles()
     if s_type not in matrix_profiles:
@@ -1114,33 +817,6 @@ async def wake(interaction: discord.Interaction, duration: str):
     task = asyncio.create_task(wake_timer_worker(guild_id, channel_id, seconds))
     bot.wake_tasks[guild_id] = task
     await interaction.response.send_message(f"⏰ Wake timer initialized. Broadcasting starts automatically in **{duration}**.")
-
-@radio_group.command(name="android-ui", description="Get a link and one-time password for the running Android emulator's web UI")
-async def android_ui(interaction: discord.Interaction):
-    # NOTE: this hands out interactive control of a full Android instance.
-    # No subcommand in this bot currently has role/permission gating beyond
-    # Discord's own slash-command permissions for the guild -- this command
-    # follows that same existing pattern rather than introducing a new,
-    # inconsistent check. If per-command permissions are added to this bot
-    # in the future, this command should be near the front of the list for
-    # it (see memory notes / docs/sources.md security section).
-    if not getattr(bot, "compose_stack_file", None) or not getattr(bot, "android_web_password", None):
-        await interaction.response.send_message(
-            "The Android emulator source isn't currently running.", ephemeral=True
-        )
-        return
-
-    host = ANDROID_WEB_HOST or "<set ANDROID_WEB_HOST in .env to your host's LAN IP or domain>"
-    port = getattr(bot, "android_web_port", ANDROID_WEB_PORT)
-    url = f"http://{host}:{port}"
-
-    # Ephemeral only -- never posted where anyone else in the channel can see it.
-    await interaction.response.send_message(
-        f"🖥️ Android emulator web UI: {url}\n"
-        f"🔑 Password: `{bot.android_web_password}`\n"
-        f"_Valid until this source is stopped._",
-        ephemeral=True,
-    )
 
 # =========================================================================
 # 7. CRASH RECOVERY LIFECYCLES & STARTUP HOOKS
