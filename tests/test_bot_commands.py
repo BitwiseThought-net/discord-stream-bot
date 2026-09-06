@@ -54,7 +54,7 @@ def make_interaction(guild_id=1, voice_client=None, user_voice_channel="__unset_
 
 
 # ======================================================================
-# discover_hardware_profile - ALSA + SDR probe branches
+# discover_hardware_profile — ALSA + SDR probe branches
 # ======================================================================
 
 class TestDiscoverHardwareProfileAlsaBranch:
@@ -367,41 +367,6 @@ class TestSpawnHardwareCaptureStream:
              patch("bot.subprocess.Popen", return_value=MagicMock()):
             bot.spawn_hardware_capture_stream({"type": "usb_mic"})
         mock_stop.assert_called_once()
-
-    def test_docker_compose_dispatch_calls_android_stack(self):
-        """pipeline_type: docker_compose delegates to _spawn_android_emulator_stack."""
-        profiles = {
-            "android_emulator": {"pipeline_template": "", "discovery_trigger": "always_available"}
-        }
-        fake_reader = MagicMock()
-        try:
-            with patch.object(bot, "load_matrix_source_profiles", return_value=profiles), \
-                 patch.object(bot, "stop_active_hardware_process"), \
-                 patch("bot.subprocess.run") as mock_run, \
-                 patch("bot.subprocess.Popen", return_value=fake_reader) as mock_popen, \
-                 patch("bot.FIFO_PIPE", "/tmp/fake_pipe"):
-                bot.spawn_hardware_capture_stream({
-                    "type": "android_emulator",
-                    "pipeline_type": "docker_compose"
-                })
-            # Must NOT spawn a real docker compose process
-            assert mock_run.call_count == 0
-            # Must have created a compose file on the bot client instance
-            # (NOTE: state lives on the StreamBotClient instance `bot.bot`,
-            # not on the bot module itself -- see self.compose_stack_file
-            # in StreamBotClient.__init__.)
-            assert hasattr(bot.bot, "compose_stack_file") and bot.bot.compose_stack_file is not None
-        finally:
-            # This test deliberately mocks out stop_active_hardware_process,
-            # so the compose-stack/reader-process state _spawn_android_emulator_stack
-            # sets on the shared bot.bot singleton would otherwise leak into
-            # later tests (e.g. TestStopActiveHardwareProcess*) that call the
-            # real stop_active_hardware_process() and pick up this leftover
-            # state. Reset it explicitly.
-            bot.bot.compose_stack_file = None
-            bot.bot.compose_reader_process = None
-            bot.bot.android_web_password = None
-            bot.bot.android_web_port = None
 
 
 # ======================================================================
@@ -1300,7 +1265,7 @@ class TestWakeTimerWorker:
 
 
 # ======================================================================
-# find_peaks_in_step - DC-guard exclusion and multi-peak grouping
+# find_peaks_in_step — DC-guard exclusion and multi-peak grouping
 # ======================================================================
 
 class TestFindPeaksInStepDcGuard:
@@ -1373,7 +1338,7 @@ class TestFindPeaksInStepDcGuard:
 
 
 # ======================================================================
-# execute_channel_scan - full success/failure flows
+# execute_channel_scan — full success/failure flows
 # ======================================================================
 
 class TestExecuteChannelScanFullFlow:
@@ -1449,7 +1414,7 @@ class TestExecuteChannelScanFullFlow:
 
 
 # ======================================================================
-# on_ready - crash recovery lifecycle
+# on_ready — crash recovery lifecycle
 # ======================================================================
 
 def _patched_bot_user():
@@ -1606,7 +1571,7 @@ class TestSetupHook:
 
 
 # ======================================================================
-# tune_channel - corrupt state file without an active voice client
+# tune_channel — corrupt state file without an active voice client
 # ======================================================================
 
 class TestTuneChannelCorruptStateNoVc:

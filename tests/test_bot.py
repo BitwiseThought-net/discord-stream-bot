@@ -344,7 +344,7 @@ class TestLoadMatrixSourceProfiles:
     def test_self_heals_missing_test_signal(self, tmp_path):
         sources_dir = str(tmp_path / "sources")
         os.makedirs(sources_dir, exist_ok=True)
-        # No test_signal.json - should be created by self-heal
+        # No test_signal.json — should be created by self-heal
 
         with patch("bot.SOURCES_DIR", sources_dir):
             profiles = bot.load_matrix_source_profiles()
@@ -566,7 +566,7 @@ class TestFindPeaksInStep:
         assert result == []
 
     def test_no_peaks_above_threshold(self):
-        """Uniform noise - median should place threshold above all values."""
+        """Uniform noise — median should place threshold above all values."""
         rng = np.random.default_rng(42)
         samples = rng.standard_normal(16384).astype(np.complex64)
         # All bins are normal noise; with median ~0 and threshold ~12 dB,
@@ -577,7 +577,7 @@ class TestFindPeaksInStep:
         assert isinstance(result, list)
 
     def test_with_signal_peak(self):
-        """Inject a strong peak at center frequency - should appear."""
+        """Inject a strong peak at center frequency — should appear."""
         rng = np.random.default_rng(123)
         noise = rng.standard_normal(16384).astype(np.complex64) * 0.01
         samples = noise.copy()
@@ -592,7 +592,7 @@ class TestFindPeaksInStep:
 
 
 # ======================================================================
-# capture_iq_samples - subprocess call to rtl_sdr
+# capture_iq_samples — subprocess call to rtl_sdr
 # ======================================================================
 
 class TestCaptureIqSamples:
@@ -638,7 +638,7 @@ class TestCaptureIqSamples:
 
 
 # ======================================================================
-# scan_for_clear_channels_sync - blocking sweep
+# scan_for_clear_channels_sync — blocking sweep
 # ======================================================================
 
 class TestScanForClearChannelsSync:
@@ -789,7 +789,7 @@ class TestStopActiveHardwareProcess:
 
 
 # ======================================================================
-# execute_stream_pipeline - partial test without full discord mock
+# execute_stream_pipeline — partial test without full discord mock
 # ======================================================================
 
 class TestExecuteStreamPipeline:
@@ -816,7 +816,7 @@ class TestExecuteStreamPipeline:
 
 
 # ======================================================================
-# execute_channel_scan - validation path
+# execute_channel_scan — validation path
 # ======================================================================
 
 class TestExecuteChannelScan:
@@ -845,7 +845,7 @@ class TestExecuteChannelScan:
 
 
 # ======================================================================
-# parse_scan_range - edge cases for frequency validation
+# parse_scan_range — edge cases for frequency validation
 # ======================================================================
 
 class TestScanRangeEdgeCases:
@@ -863,7 +863,7 @@ class TestScanRangeEdgeCases:
 
 
 # ======================================================================
-# probe_device_has_signal - stderr parsing edge cases
+# probe_device_has_signal — stderr parsing edge cases
 # ======================================================================
 
 class TestProbeDeviceHasSignalEdgeCases:
@@ -897,7 +897,7 @@ class TestProbeDeviceHasSignalEdgeCases:
 
 
 # ======================================================================
-# save_stream_state - CURRENT_* globals in payload
+# save_stream_state — CURRENT_* globals in payload
 # ======================================================================
 
 class TestSaveStreamStateGlobals:
@@ -914,7 +914,7 @@ class TestSaveStreamStateGlobals:
 
 
 # ======================================================================
-# resolve_active_source - more boundary tests
+# resolve_active_source — more boundary tests
 # ======================================================================
 
 class TestResolveActiveSourceEdgeCases:
@@ -979,7 +979,7 @@ class TestSelfHealTestSignalProfile:
 
 
 # ======================================================================
-# Test parse_scan_range - more edge cases
+# Test parse_scan_range — more edge cases
 # ======================================================================
 
 class TestParseScanRangeMore:
