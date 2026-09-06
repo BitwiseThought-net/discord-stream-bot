@@ -240,7 +240,8 @@ def discover_hardware_profile():
         "type": "test_signal",
         "device": "virtual",
         "channels": "2",
-        "description": test_config.get("description")
+        "description": test_config.get("description"),
+        "pipeline_type": test_config.get("pipeline_type", "default")
     })
 
     try:
@@ -279,7 +280,8 @@ def discover_hardware_profile():
                         "type": s_type,
                         "device": device_string,
                         "channels": channels,
-                        "description": label_template.format(device=device_string)
+                        "description": label_template.format(device=device_string),
+                        "pipeline_type": config.get("pipeline_type", "default")
                     })
             except Exception as e:
                 print(f"⚠️ ALSA file matrix scan exception: {e}")
@@ -292,7 +294,8 @@ def discover_hardware_profile():
                     "type": s_type,
                     "device": "rtlsdr",
                     "channels": "1",
-                    "description": config.get("description", f"SDR Module Channel Capture ({s_type})")
+                    "description": config.get("description", f"SDR Module Channel Capture ({s_type})"),
+                    "pipeline_type": config.get("pipeline_type", "default")
                 })
 
         # 3. ALWAYS-AVAILABLE SOURCES (no physical hardware to probe --
@@ -305,7 +308,8 @@ def discover_hardware_profile():
                 "type": s_type,
                 "device": config.get("device", ""),
                 "channels": config.get("channels", "2"),
-                "description": config.get("description", s_type)
+                "description": config.get("description", s_type),
+                "pipeline_type": config.get("pipeline_type", "default")
             })
 
     try:

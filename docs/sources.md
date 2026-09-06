@@ -38,6 +38,26 @@ When the source is stopped (or another source is started), `stop_active_hardware
 
 Because the bridge writes into the same `$FIFO_PIPE` as every other source, nothing downstream of the pipe (the Discord voice send loop) needs to know or care that the audio originated from a container instead of a physical device.
 
+### 1b. When the container actually starts and stops
+
+Selecting the source in the bot does not itself talk to Docker — it just picks *which* source is active. The container only starts when that selection actually gets streamed:
+
+1. **`/radio input`** (no index) lists available sources — this only discovers/lists, nothing starts here.
+2. **`/radio input <index>`** for the Android emulator's index, or **`/radio start`** when it's already the saved source, calls `execute_stream_pipeline()` → `spawn_hardware_capture_stream(active_source)`. That function checks `active_source["pipeline_type"]`; when it's `"docker_compose"`, it delegates to `_spawn_android_emulator_stack()` — **this is the actual `docker compose up` moment.**
+3. **On bot restart**, if `RECOVERY_MODE=resume` (the default) and the Android emulator was the last-active source, `on_ready()` re-reads `STATE_FILE` and runs the same pipeline path, starting the container again automatically.
+4. **`/radio stop`**, or switching to a different source, tears the container back down via `stop_active_hardware_process()`.
+
+So: it's on-demand, tied to when the source is actually streamed, not something that starts as soon as the bot boots or as soon as the source appears in `/radio input`'s list.
+
+#### Two discovery bugs found and fixed while tracing this path
+
+Both of these were bugs in the code as merged in PR #52, found by walking through "does selecting this source actually work end-to-end" rather than anything introduced afterward:
+
+- **The source didn't appear in `/radio input`'s list at all.** `discover_hardware_profile()`'s scan loop only recognized two `discovery_trigger` values: `alsa_sound_card` and anything starting with `usb_chipset_`. `sources/android_emulator.json` uses `"discovery_trigger": "always_available"` — a value the loop never checked for. (`test_signal.json` uses that same trigger, but `test_signal` is hardcoded into slot 0 separately, which is why *it* showed up and masked the fact that `"always_available"` was otherwise dead code.) **Fixed** by adding a third branch to the loop that handles `"always_available"` generically, so any current or future no-hardware-to-probe source works the same way.
+- **Even once visible, selecting it wouldn't have started the container.** The cache entries `discover_hardware_profile()` builds (and that `/radio input <index>` resolves against) only copied `type`/`device`/`channels`/`description` from each source's JSON profile — `pipeline_type` was silently dropped. Since `spawn_hardware_capture_stream()` decides whether to dispatch to `_spawn_android_emulator_stack()` based on `active_source.get("pipeline_type")`, a missing field defaults to `"default"`, meaning selection would have fallen through to the normal ffmpeg pipeline path and failed with *"Explicit template structure empty"* instead of ever starting Docker. **Fixed** by propagating `pipeline_type` into every entry `discover_hardware_profile()` builds, across all three discovery branches (ALSA, SDR, always-available).
+
+Both are covered by the "when does it spin up" walkthrough above being accurate as written — if you ever add a new `docker_compose`-pipeline source, make sure its JSON profile's `pipeline_type` still shows up in `bot.discover_hardware_profile()`'s output before assuming selection will work.
+
 ---
 
 ## 2. Prerequisites
