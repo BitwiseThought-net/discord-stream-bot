@@ -23,6 +23,7 @@ RUN apt-get update && apt-get install -y \
     rtl-sdr \
     librtlsdr-dev \
     docker.io \
+    docker-compose-plugin \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
