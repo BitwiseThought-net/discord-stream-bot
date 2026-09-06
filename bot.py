@@ -295,6 +295,19 @@ def discover_hardware_profile():
                     "description": config.get("description", f"SDR Module Channel Capture ({s_type})")
                 })
 
+        # 3. ALWAYS-AVAILABLE SOURCES (no physical hardware to probe --
+        # e.g. the Android emulator, which is backed by a container, not a
+        # device node). test_signal also uses this trigger but is already
+        # locked to index 0 above and skipped here via the `continue` at
+        # the top of this loop.
+        elif trigger == "always_available":
+            available_sources.append({
+                "type": s_type,
+                "device": config.get("device", ""),
+                "channels": config.get("channels", "2"),
+                "description": config.get("description", s_type)
+            })
+
     try:
         os.makedirs(os.path.dirname(SOURCES_CACHE_FILE), exist_ok=True)
         with open(SOURCES_CACHE_FILE, 'w') as f:
