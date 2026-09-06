@@ -54,7 +54,7 @@ def make_interaction(guild_id=1, voice_client=None, user_voice_channel="__unset_
 
 
 # ======================================================================
-# discover_hardware_profile — ALSA + SDR probe branches
+# discover_hardware_profile - ALSA + SDR probe branches
 # ======================================================================
 
 class TestDiscoverHardwareProfileAlsaBranch:
@@ -1285,7 +1285,7 @@ class TestWakeTimerWorker:
 
 
 # ======================================================================
-# find_peaks_in_step — DC-guard exclusion and multi-peak grouping
+# find_peaks_in_step - DC-guard exclusion and multi-peak grouping
 # ======================================================================
 
 class TestFindPeaksInStepDcGuard:
@@ -1358,7 +1358,7 @@ class TestFindPeaksInStepDcGuard:
 
 
 # ======================================================================
-# execute_channel_scan — full success/failure flows
+# execute_channel_scan - full success/failure flows
 # ======================================================================
 
 class TestExecuteChannelScanFullFlow:
@@ -1434,7 +1434,7 @@ class TestExecuteChannelScanFullFlow:
 
 
 # ======================================================================
-# on_ready — crash recovery lifecycle
+# on_ready - crash recovery lifecycle
 # ======================================================================
 
 def _patched_bot_user():
@@ -1591,7 +1591,7 @@ class TestSetupHook:
 
 
 # ======================================================================
-# tune_channel — corrupt state file without an active voice client
+# tune_channel - corrupt state file without an active voice client
 # ======================================================================
 
 class TestTuneChannelCorruptStateNoVc:

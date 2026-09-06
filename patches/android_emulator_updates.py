@@ -1,9 +1,9 @@
 # =========================================================================
-# ANDROID EMULATOR SOURCE — updated implementation (see INTEGRATION_NOTES.md)
+# ANDROID EMULATOR SOURCE - updated implementation (see INTEGRATION_NOTES.md)
 # =========================================================================
 #
 # This file is a drop-in replacement for the corresponding sections of
-# bot.py added in PR #52. It is NOT a full bot.py — splice these pieces in
+# bot.py added in PR #52. It is NOT a full bot.py - splice these pieces in
 # at the same locations the originals occupy. See patches/INTEGRATION_NOTES.md
 # for exactly what to replace and what to double-check, since this was
 # written against the diff, not the full live file.
@@ -11,10 +11,10 @@
 # Design goals driving these changes (per project direction):
 #   1. Zero required configuration on EITHER architecture. A Raspberry Pi
 #      (arm64) and a plain x86_64 host should both "just work" the moment
-#      this source is selected — no env vars, no manual device passthrough,
+#      this source is selected - no env vars, no manual device passthrough,
 #      no per-arch setup instructions for the operator to follow.
 #   2. The single shared image tag for both architectures is intentional,
-#      not an oversight — it's expected to be a multi-arch manifest, so
+#      not an oversight - it's expected to be a multi-arch manifest, so
 #      Docker itself resolves the correct underlying image per host at
 #      pull time. Nothing in bot.py needs to choose between two tags.
 #   3. Fix the healthcheck-readiness bug identified in review (the original
@@ -56,7 +56,7 @@ def _detect_host_architecture() -> str:
     IMPORTANT: this does NOT select a different image per architecture.
     ``ANDROID_DEFAULT_IMAGE`` is expected to be a multi-arch manifest, so
     Docker resolves the correct underlying image for the host automatically
-    at pull time — that's *why* both architectures intentionally point at
+    at pull time - that's *why* both architectures intentionally point at
     the same tag. This function exists to tune compose-stack *behavior*
     that legitimately differs by host (KVM availability, startup timeout),
     so the source works with zero required configuration on both a
@@ -75,7 +75,7 @@ def _kvm_available() -> bool:
     """Return True if /dev/kvm exists and is read/write-accessible.
 
     Hardware-accelerated x86 emulation needs KVM. Most Raspberry Pi hosts
-    won't have it — the emulator image is expected to fall back to
+    won't have it - the emulator image is expected to fall back to
     software rendering in that case, which is slower but still functional,
     which is exactly the "works with no extra config" behavior wanted here.
     Some x86_64 hosts without virtualization enabled in BIOS/hypervisor
@@ -113,7 +113,7 @@ def _spawn_android_emulator_stack(active_source):
 
     Works by:
       1. Probing host capability (KVM presence) to decide whether to pass
-         /dev/kvm through, and to size the startup timeout accordingly —
+         /dev/kvm through, and to size the startup timeout accordingly -
          no architecture-specific user configuration required.
       2. Generating a fresh per-session web UI password.
       3. Writing a temporary compose YAML with a shared volume, VNC/web UI
@@ -121,7 +121,7 @@ def _spawn_android_emulator_stack(active_source):
       4. Launching ``docker compose up -d`` in detached mode (falling back
          to the standalone ``docker-compose`` binary if the v2 plugin isn't
          present).
-      5. Waiting for the healthcheck to actually report healthy (fixed —
+      5. Waiting for the healthcheck to actually report healthy (fixed -
          see notes above) before starting the audio bridge.
       6. Spawning a tail+ffmpeg bridge process that reads audio PCM from
          the shared volume and appends it to {FIFO_PIPE}.
@@ -182,7 +182,7 @@ def _spawn_android_emulator_stack(active_source):
         )
         return
 
-    # Start the compose stack (v2 plugin first, standalone binary fallback —
+    # Start the compose stack (v2 plugin first, standalone binary fallback -
     # this fallback previously only existed on the teardown path; adding it
     # here too means a host with only the legacy binary still "just works").
     result = subprocess.run(
@@ -247,14 +247,14 @@ def _spawn_android_emulator_stack(active_source):
 
 
 # =========================================================================
-# TEARDOWN — extend the existing compose-stack cleanup block inside
+# TEARDOWN - extend the existing compose-stack cleanup block inside
 # stop_active_hardware_process() with credential cleanup. Splice this in
 # place of the equivalent `if getattr(bot, 'compose_stack_file', None):`
 # block that already exists there (logic is otherwise unchanged; only the
 # `finally` clause gained one line).
 # =========================================================================
 def _teardown_android_stack_block():
-    """Not a standalone function — this is the updated body to paste into
+    """Not a standalone function - this is the updated body to paste into
     stop_active_hardware_process() in place of the existing compose-stack
     teardown block. Included here as its own function only so it can be
     pasted as one contiguous chunk; do not call this directly."""
@@ -283,14 +283,14 @@ def _teardown_android_stack_block():
 
 
 # =========================================================================
-# WEB UI — first working version of the `android-ui` command.
+# WEB UI - first working version of the `android-ui` command.
 #
 # INTEGRATION NOTE: this is written as a bare app_commands.command bound to
 # `radio_group` by decorator, matching the group already created in
 # bot.py (`radio_group = app_commands.Group(name=COMMAND_NAME, ...)`).
 # The actual file may register subcommands differently (e.g. via a cog, or
 # with an existing permission-check decorator used by other privileged
-# /radio subcommands) — mirror whatever pattern the real file uses for its
+# /radio subcommands) - mirror whatever pattern the real file uses for its
 # other subcommands rather than pasting this verbatim. See
 # INTEGRATION_NOTES.md.
 # =========================================================================
@@ -300,7 +300,7 @@ def _teardown_android_stack_block():
 )
 async def android_ui(interaction: discord.Interaction):
     # TODO: gate this behind whatever role/owner check already guards the
-    # other privileged /radio subcommands in this file — this command
+    # other privileged /radio subcommands in this file - this command
     # hands out interactive control of a full Android instance.
     if not getattr(bot, "compose_stack_file", None) or not getattr(bot, "android_web_password", None):
         await interaction.response.send_message(
@@ -313,7 +313,7 @@ async def android_ui(interaction: discord.Interaction):
     port = getattr(bot, "android_web_port", ANDROID_WEB_PORT)
     url = f"http://{host}:{port}"
 
-    # Ephemeral / DM only — never post this in a channel anyone else can read.
+    # Ephemeral / DM only - never post this in a channel anyone else can read.
     await interaction.response.send_message(
         f"🖥️ Android emulator web UI: {url}\n"
         f"🔑 Password: `{bot.android_web_password}`\n"
