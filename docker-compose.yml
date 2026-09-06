@@ -9,6 +9,18 @@ services:
       - DISCORD_TOKEN=${DISCORD_TOKEN}
       - COMMAND_BASE=${COMMAND_BASE:-radio}
       - RECOVERY_MODE=${RECOVERY_MODE:-resume}
+      # Android emulator source (see docs/sources.md / .env.example) --
+      # this block is required for those variables to reach the bot
+      # process at all: `environment:` here is an allowlist, not a
+      # passthrough of the whole .env file. Anything missing from this
+      # list is silently unset inside the container regardless of .env.
+      - ANDROID_EMULATOR_IMAGE=${ANDROID_EMULATOR_IMAGE:-linuxserver/android:armv7-x86_64}
+      - ANDROID_DATA_VOLUME=${ANDROID_DATA_VOLUME:-android_output}
+      - ANDROID_STARTUP_TIMEOUT_S=${ANDROID_STARTUP_TIMEOUT_S:-}
+      - COMPOSE_TMP_DIR=${COMPOSE_TMP_DIR:-/tmp}
+      - ANDROID_WEB_VNC=${ANDROID_WEB_VNC:-true}
+      - ANDROID_WEB_PORT=${ANDROID_WEB_PORT:-3000}
+      - ANDROID_WEB_HOST=${ANDROID_WEB_HOST:-}
     volumes:
       - discord_bot_data:/data
       - ./sources:/sources:ro
@@ -19,5 +31,3 @@ services:
 
 volumes:
   discord_bot_data:
-  android_output:
-    name: discord_bot_data
