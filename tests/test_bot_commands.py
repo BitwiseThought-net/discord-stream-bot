@@ -374,19 +374,34 @@ class TestSpawnHardwareCaptureStream:
             "android_emulator": {"pipeline_template": "", "discovery_trigger": "always_available"}
         }
         fake_reader = MagicMock()
-        with patch.object(bot, "load_matrix_source_profiles", return_value=profiles), \
-             patch.object(bot, "stop_active_hardware_process"), \
-             patch("bot.subprocess.run") as mock_run, \
-             patch("bot.subprocess.Popen", return_value=fake_reader) as mock_popen, \
-             patch("bot.FIFO_PIPE", "/tmp/fake_pipe"):
-            bot.spawn_hardware_capture_stream({
-                "type": "android_emulator",
-                "pipeline_type": "docker_compose"
-            })
-        # Must NOT spawn a real docker compose process
-        assert mock_run.call_count == 0
-        # Must have created a compose file on the bot object
-        assert hasattr(bot, "compose_stack_file") and bot.compose_stack_file is not None
+        try:
+            with patch.object(bot, "load_matrix_source_profiles", return_value=profiles), \
+                 patch.object(bot, "stop_active_hardware_process"), \
+                 patch("bot.subprocess.run") as mock_run, \
+                 patch("bot.subprocess.Popen", return_value=fake_reader) as mock_popen, \
+                 patch("bot.FIFO_PIPE", "/tmp/fake_pipe"):
+                bot.spawn_hardware_capture_stream({
+                    "type": "android_emulator",
+                    "pipeline_type": "docker_compose"
+                })
+            # Must NOT spawn a real docker compose process
+            assert mock_run.call_count == 0
+            # Must have created a compose file on the bot client instance
+            # (NOTE: state lives on the StreamBotClient instance `bot.bot`,
+            # not on the bot module itself -- see self.compose_stack_file
+            # in StreamBotClient.__init__.)
+            assert hasattr(bot.bot, "compose_stack_file") and bot.bot.compose_stack_file is not None
+        finally:
+            # This test deliberately mocks out stop_active_hardware_process,
+            # so the compose-stack/reader-process state _spawn_android_emulator_stack
+            # sets on the shared bot.bot singleton would otherwise leak into
+            # later tests (e.g. TestStopActiveHardwareProcess*) that call the
+            # real stop_active_hardware_process() and pick up this leftover
+            # state. Reset it explicitly.
+            bot.bot.compose_stack_file = None
+            bot.bot.compose_reader_process = None
+            bot.bot.android_web_password = None
+            bot.bot.android_web_port = None
 
 
 # ======================================================================

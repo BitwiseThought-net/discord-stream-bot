@@ -20,7 +20,7 @@ When a source profile sets `"pipeline_type": "docker_compose"`, `spawn_hardware_
    - `/dev/kvm` passed through automatically when present on the host, omitted when it isn't - no configuration required either way
    - a healthcheck that polls for the `emulator64` process
    - a freshly generated one-time password for the emulator's built-in web UI (see §7)
-3. Runs `docker compose -f <tmp file> up -d` to launch the stack, and polls `docker compose ps` - waiting for the healthcheck to actually report **healthy** (not just "container is up") before proceeding, for a duration that scales with host capability (short on an accelerated x86_64 host, longer on unaccelerated ARM boards).
+3. Runs `docker compose -f <tmp file> up -d --wait --wait-timeout <N>`, letting Compose itself block until the container's healthcheck actually reports **healthy** (or the wait times out) - for a timeout that scales with host capability (short on an accelerated x86_64 host, longer on unaccelerated ARM boards). This replaced an earlier hand-rolled `docker compose ps` polling loop that had a bug: it treated `"Up (health: starting)"` as ready, which isn't the same as actually healthy.
 4. Spawns a bridge process: `tail -f <shared PCM file> | ffmpeg ... >> $FIFO_PIPE`, which continuously converts the emulator's raw audio into the format the bot's existing FIFO-based streaming pipeline expects, and appends it to the same FIFO everything else streams through.
 
 ### 1a. One image for both architectures - by design
@@ -175,7 +175,14 @@ To use it:
 
 ## 9. Known gaps / things to verify before production use
 
-- **`sources/android_emulator.json`'s exact schema** wasn't fully visible during this doc's writing - confirm against the live file.
-- **No automated tests cover this path yet** - treat it as beta until `_spawn_android_emulator_stack`, the compose-teardown path, and the `android-ui` command have direct test coverage.
-- **Web UI hardening** (reverse proxy/TLS, permission gating) is a known follow-up, not yet done - see `memory/security-concerns.md`.
-- **`sources/android_apps.json` app auto-provisioning** is still just a plan, not implemented - see `memory/android-emulator-source.md` §3.
+- **`_spawn_android_emulator_stack` has direct test coverage** for the
+  dispatch path (`tests/test_bot_commands.py::TestSpawnHardwareCaptureStream::
+  test_docker_compose_dispatch_calls_android_stack`) - it asserts every
+  docker/compose call goes through `subprocess.Popen`, never
+  `subprocess.run`. Keep that invariant if you touch this function again.
+- **Web UI hardening** (reverse proxy/TLS, real permission gating beyond
+  Discord's own slash-command guild permissions) is a known follow-up, not
+  yet done - see `memory/security-concerns.md` if present, or the
+  discussion history for this feature.
+- **`sources/android_apps.json` app auto-provisioning** is still just a
+  plan, not implemented.
