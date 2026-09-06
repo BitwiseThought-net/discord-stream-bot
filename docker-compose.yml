@@ -14,7 +14,7 @@ services:
       # process at all: `environment:` here is an allowlist, not a
       # passthrough of the whole .env file. Anything missing from this
       # list is silently unset inside the container regardless of .env.
-      - ANDROID_EMULATOR_IMAGE=${ANDROID_EMULATOR_IMAGE:-linuxserver/android:armv7-x86_64}
+      - ANDROID_EMULATOR_IMAGE=${ANDROID_EMULATOR_IMAGE:-shmayro/dockerify-android:latest}
       - ANDROID_DATA_VOLUME=${ANDROID_DATA_VOLUME:-android_output}
       - ANDROID_STARTUP_TIMEOUT_S=${ANDROID_STARTUP_TIMEOUT_S:-}
       - COMPOSE_TMP_DIR=${COMPOSE_TMP_DIR:-/tmp}

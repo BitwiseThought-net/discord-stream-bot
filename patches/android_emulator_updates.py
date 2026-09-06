@@ -34,7 +34,7 @@ import time
 # ---- Configuration (env-overridable; every default is chosen so nothing
 # ---- has to be set for a working zero-config first run) -----------------
 ANDROID_DEFAULT_IMAGE = os.environ.get(
-    "ANDROID_EMULATOR_IMAGE", "linuxserver/android:armv7-x86_64"
+    "ANDROID_EMULATOR_IMAGE", "shmayro/dockerify-android:latest"
 )
 ANDROID_DATA_VOLUME = os.environ.get("ANDROID_DATA_VOLUME", "android_output")
 ANDROID_STARTUP_TIMEOUT_S_OVERRIDE = os.environ.get("ANDROID_STARTUP_TIMEOUT_S")

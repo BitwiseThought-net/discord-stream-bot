@@ -25,7 +25,7 @@ When a source profile sets `"pipeline_type": "docker_compose"`, `spawn_hardware_
 
 ### 1a. One image for both architectures - by design
 
-The same image tag is used regardless of whether the code detects `arm64` or `x86_64`. **This is intentional, not an oversight.** The project's goal is zero-config support on both a Raspberry Pi and a plain x86_64 host - a user shouldn't have to know or care which architecture they're on. The configured tag (`linuxserver/android:armv7-x86_64` by default) is expected to be a multi-arch manifest, meaning Docker itself resolves the correct underlying image for the host at pull time - the same way official images like `python:3.12` work unmodified across amd64 and arm64. The Python-side architecture detection is repurposed instead for the things that legitimately differ by host and *aren't* solved by the image being multi-arch: whether `/dev/kvm` exists to pass through, and how long to wait for the (typically slower, unaccelerated) ARM emulation path to boot.
+The same image tag is used regardless of whether the code detects `arm64` or `x86_64`. **This is intentional, not an oversight.** The project's goal is zero-config support on both a Raspberry Pi and a plain x86_64 host - a user shouldn't have to know or care which architecture they're on. The configured tag (`shmayro/dockerify-android:latest` by default) is expected to be a multi-arch manifest, meaning Docker itself resolves the correct underlying image for the host at pull time - the same way official images like `python:3.12` work unmodified across amd64 and arm64. The Python-side architecture detection is repurposed instead for the things that legitimately differ by host and *aren't* solved by the image being multi-arch: whether `/dev/kvm` exists to pass through, and how long to wait for the (typically slower, unaccelerated) ARM emulation path to boot.
 
 If you swap in a different image and it turns out not to be genuinely multi-arch, you'll see this at container-start time (wrong-architecture image failing to run) rather than anywhere in this code path - worth a quick manual check (`docker manifest inspect <image>`) the first time you change `ANDROID_EMULATOR_IMAGE`.
 
@@ -81,7 +81,7 @@ All of the following are optional - every default is chosen so the source works 
 
 | Variable | Default | Purpose |
 |---|---|---|
-| `ANDROID_EMULATOR_IMAGE` | `linuxserver/android:armv7-x86_64` | Override the image (must be a genuine multi-arch manifest - see §1a). |
+| `ANDROID_EMULATOR_IMAGE` | `shmayro/dockerify-android:latest` | Override the image (must be a genuine multi-arch manifest - see §1a). |
 | `ANDROID_DATA_VOLUME` | `android_output` | Volume name; change if running multiple bot instances on one host. |
 | `ANDROID_STARTUP_TIMEOUT_S` | *(auto: 30s with KVM, 90s without)* | Force a specific startup wait instead of the capability-based default. |
 | `COMPOSE_TMP_DIR` | `/tmp` | Where the generated compose file is written; override on hosts that restrict `/tmp`. |
