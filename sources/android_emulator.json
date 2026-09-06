@@ -1,6 +1,0 @@
-{
-    "type": "android_emulator",
-    "description": "Android Emulator (Docker)",
-    "discovery_trigger": "always_available",
-    "pipeline_type": "docker_compose"
-}
