@@ -64,7 +64,7 @@ Both are covered by the "when does it spin up" walkthrough above being accurate 
 
 The Android source needs privileges the other sources don't. Before enabling it:
 
-- **Docker Engine on the host**, with `docker compose` (v2 plugin) available. The code falls back to the standalone `docker-compose` binary if the plugin call fails, on both startup and teardown.
+- **Docker Engine on the host**, with `docker compose` (v2 plugin) available. The code falls back to the standalone `docker-compose` binary if the plugin call fails, on both startup and teardown. **This means the bot container's own image needs the compose plugin too** — the `docker` CLI is what talks to the host daemon over the mounted socket, but it's the CLI *inside the bot's own container* that parses `docker compose ...`. The `Dockerfile` installs `docker-compose-plugin` alongside `docker.io` specifically for this reason: plain `docker.io` alone (the Debian/Ubuntu apt package) ships the base `docker` CLI **without** the compose plugin, which fails in a confusing way (see Troubleshooting) rather than a clear "not found" error.
 - **The bot container needs to control the host's Docker daemon.** This PR adds:
   - `docker.io` to the bot's own `Dockerfile` (gives the bot container a `docker` CLI)
   - `/var/run/docker.sock:/var/run/docker.sock` to `docker-compose.yml` (gives the bot container access to the host Docker daemon)
@@ -185,6 +185,7 @@ To use it:
 | Symptom | Likely cause |
 |---|---|
 | `❌ [Docker] Android emulator start failed` in logs | `docker compose up -d` failed - check `docker.sock` is mounted and the bot container's user can access it. |
+| `unknown shorthand flag: 'f' in -f` followed by the full `docker --help` usage text, plus `docker-compose down failed: [Errno 2] No such file or directory: 'docker-compose'` | The bot container's own `docker` CLI doesn't have the Compose v2 plugin installed, so `docker compose ...` isn't recognized as a subcommand at all (args get reparsed as if `-f` were a top-level flag) — and there's no standalone `docker-compose` binary to fall back to either. Fixed by adding `docker-compose-plugin` to the `Dockerfile`; if you're still seeing this, rebuild the bot image with `--no-cache` and confirm `docker exec -it discord_audio_bot docker compose version` succeeds. |
 | `❌ [Docker] docker CLI not found in the bot container` | `docker.io` didn't get installed, or you're running an older image - rebuild with `--no-cache`. |
 | `⚠️ [Docker] Android container did not report healthy within Ns` | Emulator is slow to boot (expected without KVM - see §1a) or something is actually wrong. Increase `ANDROID_STARTUP_TIMEOUT_S` if it's just slow; check `docker logs` on the android container if it never comes up at all. |
 | No audio in the voice channel, no errors | The shared volume path (`android_output` → `/data/android_output/emulator_audio.pcm`) may not match what's actually running inside the emulator - confirm the emulator (or an app on it) is actually producing PCM output at that path. |
