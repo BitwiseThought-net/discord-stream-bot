@@ -1,7 +1,11 @@
 #!/bin/bash
 
+pushd ..
+
 echo "Downing existing containers..."
 docker compose down
+
+git pull
 
 echo "Building new images..."
 docker compose build --no-cache
