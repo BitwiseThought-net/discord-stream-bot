@@ -1,7 +1,5 @@
 #!/bin/bash
 
-pushd ..
-
 echo "Downing existing containers..."
 docker compose down
 
