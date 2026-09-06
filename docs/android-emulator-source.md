@@ -49,7 +49,7 @@ env-overridable as of the code update in this pass (see
 
 | Variable | Default | Notes |
 |---|---|---|
-| `ANDROID_EMULATOR_IMAGE` | `linuxserver/android:armv7-x86_64` | Must be genuinely multi-arch if overridden |
+| `ANDROID_EMULATOR_IMAGE` | `shmayro/dockerify-android:latest` | Must be genuinely multi-arch if overridden |
 | `ANDROID_DATA_VOLUME` | `android_output` | For multi-instance hosts |
 | `ANDROID_STARTUP_TIMEOUT_S` | auto (30s w/ KVM, 90s without) | Manual override |
 | `COMPOSE_TMP_DIR` | `/tmp` | For hosts restricting `/tmp` |

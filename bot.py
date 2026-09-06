@@ -37,7 +37,8 @@ SOURCES_DIR = os.getenv('SOURCES_DIR', '/sources')            # Configuration di
 # --- Android emulator source (docker_compose pipeline_type) ---
 # All optional; defaults are chosen so the source works with zero config
 # on both ARM (e.g. Raspberry Pi) and x86_64 hosts. See docs/sources.md.
-ANDROID_EMULATOR_IMAGE = os.getenv('ANDROID_EMULATOR_IMAGE', 'linuxserver/android:armv7-x86_64')
+ANDROID_EMULATOR_IMAGE = os.getenv('ANDROID_EMULATOR_IMAGE', 'shmayro/dockerify-android:latest')
+ANDROID_EMULATOR_IMAGE_WEB = os.getenv('ANDROID_EMULATOR_IMAGE', 'shmayro/scrcpy-web:latest')
 ANDROID_DATA_VOLUME = os.getenv('ANDROID_DATA_VOLUME', 'android_output')
 ANDROID_STARTUP_TIMEOUT_S_OVERRIDE = os.getenv('ANDROID_STARTUP_TIMEOUT_S')
 COMPOSE_TMP_DIR = os.getenv('COMPOSE_TMP_DIR', '/tmp')
@@ -508,6 +509,7 @@ def _spawn_android_emulator_stack(active_source):
     arch = _detect_host_architecture()
     has_kvm = _kvm_available()
     image = ANDROID_EMULATOR_IMAGE
+    image_web = ANDROID_EMULATOR_IMAGE_WEB
 
     # Shared volume mount point inside the container where Android audio is written
     android_data_vol = ANDROID_DATA_VOLUME
@@ -527,6 +529,7 @@ def _spawn_android_emulator_stack(active_source):
     compose_yaml = f"""services:
   android:
     image: {image}
+    container_name: android
     privileged: true
     network_mode: host
     environment:
@@ -534,8 +537,20 @@ def _spawn_android_emulator_stack(active_source):
       - ENABLE_VNC=no
       - CUSTOM_PORT={ANDROID_WEB_PORT}
       - PASSWORD={web_password}
+      - RAM_SIZE=2048
+      - SCREEN_RESOLUTION=1280x720
+      - SCREEN_DENSITY=227
+      - ROOT_SETUP=1
+      - GAPPS_SETUP=1
+      - ARM_TRANSLATION=1
     volumes:
       - {android_data_vol}:/data/android_output{kvm_block}
+      - ./data:/data
+      - ./extras:/extras
+    ports:
+      - "5555:5555"
+    devices:
+      - /dev/kvm
     tmpfs:
       - /tmp
     healthcheck:
@@ -543,6 +558,18 @@ def _spawn_android_emulator_stack(active_source):
       interval: 10s
       timeout: 5s
       retries: 30
+  scrcpy-web:
+    image: {image_web}
+    container_name: android-web
+    privileged: true
+    ports:
+      - "8000:8000"
+    depends_on:
+      android:
+        condition: service_healthy
+    command: >
+      sh -c "adb connect android:5555 && npm start"
+    restart: unless-stopped
 """
 
     # Write temporary compose file
