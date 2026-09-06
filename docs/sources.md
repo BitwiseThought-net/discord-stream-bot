@@ -2,8 +2,8 @@
 
 `discord-stream-bot` supports two families of audio sources:
 
-1. **Standard hardware/SDR sources** — driven by JSON profiles under `sources/*.json` and a fixed sox/ffmpeg subprocess pipeline (line-in, USB mic, RTL-SDR, etc).
-2. **Docker-Compose-driven sources** — sources that need their own containerized environment. The first of these is the **Android emulator** source, added in PR #52.
+1. **Standard hardware/SDR sources** - driven by JSON profiles under `sources/*.json` and a fixed sox/ffmpeg subprocess pipeline (line-in, USB mic, RTL-SDR, etc).
+2. **Docker-Compose-driven sources** - sources that need their own containerized environment. The first of these is the **Android emulator** source, added in PR #52.
 
 This document covers setup, configuration, and operation of the Android emulator source specifically.
 
@@ -13,21 +13,21 @@ This document covers setup, configuration, and operation of the Android emulator
 
 When a source profile sets `"pipeline_type": "docker_compose"`, `spawn_hardware_capture_stream()` skips the normal sox/ffmpeg dispatch and instead calls `_spawn_android_emulator_stack()`, which:
 
-1. Detects host CPU architecture (`arm64` vs `x86_64`) — **not** to pick a different image (see §1a below), but to decide whether to pass `/dev/kvm` through and how long to wait for the container to come up.
+1. Detects host CPU architecture (`arm64` vs `x86_64`) - **not** to pick a different image (see §1a below), but to decide whether to pass `/dev/kvm` through and how long to wait for the container to come up.
 2. Writes a temporary `docker-compose.android.<pid>.yml` to `/tmp`, defining a single `android` service (the `linuxserver/android` image) with:
    - `privileged: true` and `network_mode: host` (required for the Android emulator's virtualization and networking to work correctly)
    - a shared named volume (`android_output`) where the emulator writes its captured audio as raw PCM
-   - `/dev/kvm` passed through automatically when present on the host, omitted when it isn't — no configuration required either way
+   - `/dev/kvm` passed through automatically when present on the host, omitted when it isn't - no configuration required either way
    - a healthcheck that polls for the `emulator64` process
    - a freshly generated one-time password for the emulator's built-in web UI (see §7)
-3. Runs `docker compose -f <tmp file> up -d` to launch the stack, and polls `docker compose ps` — waiting for the healthcheck to actually report **healthy** (not just "container is up") before proceeding, for a duration that scales with host capability (short on an accelerated x86_64 host, longer on unaccelerated ARM boards).
+3. Runs `docker compose -f <tmp file> up -d` to launch the stack, and polls `docker compose ps` - waiting for the healthcheck to actually report **healthy** (not just "container is up") before proceeding, for a duration that scales with host capability (short on an accelerated x86_64 host, longer on unaccelerated ARM boards).
 4. Spawns a bridge process: `tail -f <shared PCM file> | ffmpeg ... >> $FIFO_PIPE`, which continuously converts the emulator's raw audio into the format the bot's existing FIFO-based streaming pipeline expects, and appends it to the same FIFO everything else streams through.
 
-### 1a. One image for both architectures — by design
+### 1a. One image for both architectures - by design
 
-The same image tag is used regardless of whether the code detects `arm64` or `x86_64`. **This is intentional, not an oversight.** The project's goal is zero-config support on both a Raspberry Pi and a plain x86_64 host — a user shouldn't have to know or care which architecture they're on. The configured tag (`linuxserver/android:armv7-x86_64` by default) is expected to be a multi-arch manifest, meaning Docker itself resolves the correct underlying image for the host at pull time — the same way official images like `python:3.12` work unmodified across amd64 and arm64. The Python-side architecture detection is repurposed instead for the things that legitimately differ by host and *aren't* solved by the image being multi-arch: whether `/dev/kvm` exists to pass through, and how long to wait for the (typically slower, unaccelerated) ARM emulation path to boot.
+The same image tag is used regardless of whether the code detects `arm64` or `x86_64`. **This is intentional, not an oversight.** The project's goal is zero-config support on both a Raspberry Pi and a plain x86_64 host - a user shouldn't have to know or care which architecture they're on. The configured tag (`linuxserver/android:armv7-x86_64` by default) is expected to be a multi-arch manifest, meaning Docker itself resolves the correct underlying image for the host at pull time - the same way official images like `python:3.12` work unmodified across amd64 and arm64. The Python-side architecture detection is repurposed instead for the things that legitimately differ by host and *aren't* solved by the image being multi-arch: whether `/dev/kvm` exists to pass through, and how long to wait for the (typically slower, unaccelerated) ARM emulation path to boot.
 
-If you swap in a different image and it turns out not to be genuinely multi-arch, you'll see this at container-start time (wrong-architecture image failing to run) rather than anywhere in this code path — worth a quick manual check (`docker manifest inspect <image>`) the first time you change `ANDROID_EMULATOR_IMAGE`.
+If you swap in a different image and it turns out not to be genuinely multi-arch, you'll see this at container-start time (wrong-architecture image failing to run) rather than anywhere in this code path - worth a quick manual check (`docker manifest inspect <image>`) the first time you change `ANDROID_EMULATOR_IMAGE`.
 
 When the source is stopped (or another source is started), `stop_active_hardware_process()`:
 
@@ -49,31 +49,31 @@ The Android source needs privileges the other sources don't. Before enabling it:
   - `docker.io` to the bot's own `Dockerfile` (gives the bot container a `docker` CLI)
   - `/var/run/docker.sock:/var/run/docker.sock` to `docker-compose.yml` (gives the bot container access to the host Docker daemon)
 
-  This is a real, tracked security tradeoff, not an oversight — see `memory/security-concerns.md` for the full writeup. Short version: anything with access to `docker.sock` has root-equivalent control over the host, and this source needs that to work. The project's decision is to accept this tradeoff in exchange for a source that "just works," while documenting it clearly so operators can make an informed call about where they run it.
-- Enough free disk/RAM to run an Android emulator alongside the bot — this is a full Android VM, not a lightweight process. Expect this to be noticeably slower to boot on a Raspberry Pi without KVM than on an accelerated x86_64 host — that's expected, not a bug (see §1a).
-- No manual architecture-specific setup should be required on either platform — if you find yourself needing to configure something differently for ARM vs x86_64 to get this working, that's a gap worth reporting, since "works the same with zero config on both" is the explicit design target.
+  This is a real, tracked security tradeoff, not an oversight - see `memory/security-concerns.md` for the full writeup. Short version: anything with access to `docker.sock` has root-equivalent control over the host, and this source needs that to work. The project's decision is to accept this tradeoff in exchange for a source that "just works," while documenting it clearly so operators can make an informed call about where they run it.
+- Enough free disk/RAM to run an Android emulator alongside the bot - this is a full Android VM, not a lightweight process. Expect this to be noticeably slower to boot on a Raspberry Pi without KVM than on an accelerated x86_64 host - that's expected, not a bug (see §1a).
+- No manual architecture-specific setup should be required on either platform - if you find yourself needing to configure something differently for ARM vs x86_64 to get this working, that's a gap worth reporting, since "works the same with zero config on both" is the explicit design target.
 
 ---
 
 ## 3. Configuration (environment variables)
 
-All of the following are optional — every default is chosen so the source works out of the box with **no** `.env` changes required. Set any of these only if you need to override the default:
+All of the following are optional - every default is chosen so the source works out of the box with **no** `.env` changes required. Set any of these only if you need to override the default:
 
 | Variable | Default | Purpose |
 |---|---|---|
-| `ANDROID_EMULATOR_IMAGE` | `linuxserver/android:armv7-x86_64` | Override the image (must be a genuine multi-arch manifest — see §1a). |
+| `ANDROID_EMULATOR_IMAGE` | `linuxserver/android:armv7-x86_64` | Override the image (must be a genuine multi-arch manifest - see §1a). |
 | `ANDROID_DATA_VOLUME` | `android_output` | Volume name; change if running multiple bot instances on one host. |
 | `ANDROID_STARTUP_TIMEOUT_S` | *(auto: 30s with KVM, 90s without)* | Force a specific startup wait instead of the capability-based default. |
 | `COMPOSE_TMP_DIR` | `/tmp` | Where the generated compose file is written; override on hosts that restrict `/tmp`. |
 | `ANDROID_WEB_VNC` | `true` | Enable/disable the emulator's built-in web UI entirely. |
 | `ANDROID_WEB_PORT` | `3000` | Port the web UI listens on (see §7). |
-| `ANDROID_WEB_HOST` | *(unset)* | The address the bot should tell users to connect to for the web UI — the bot can't reliably determine this on its own. **Set this if you enable the web UI.** |
+| `ANDROID_WEB_HOST` | *(unset)* | The address the bot should tell users to connect to for the web UI - the bot can't reliably determine this on its own. **Set this if you enable the web UI.** |
 
 ---
 
 ## 4. Rebuilding and redeploying
 
-Because the `Dockerfile` and `docker-compose.yml` both changed, a plain restart isn't enough — you need to rebuild the bot image and recreate the stack:
+Because the `Dockerfile` and `docker-compose.yml` both changed, a plain restart isn't enough - you need to rebuild the bot image and recreate the stack:
 
 ```bash
 docker compose build --no-cache
@@ -83,11 +83,11 @@ docker compose up -d
 Confirm the socket mount landed:
 
 ```bash
-docker exec -it discord-stream-bot ls -l /var/run/docker.sock
-docker exec -it discord-stream-bot docker ps
+docker exec -it discord_audio_bot ls -l /var/run/docker.sock
+docker exec -it discord_audio_bot docker ps
 ```
 
-If the second command fails inside the container, the socket mount or the `docker.io` package didn't take — re-check `docker-compose.yml` and rebuild.
+If the second command fails inside the container, the socket mount or the `docker.io` package didn't take - re-check `docker-compose.yml` and rebuild.
 
 ---
 
@@ -103,9 +103,9 @@ Add (or confirm) a profile at `sources/android_emulator.json`. Based on the fiel
 }
 ```
 
-> **Note:** the exact shape of `android_emulator.json` as merged in PR #52 wasn't fully visible in the diff pulled for this doc — confirm the live file in the `updates` branch matches what your matrix-profile loader (`load_matrix_source_profiles()`) expects, and add any additional fields it requires (e.g. a display name or command alias) to match your other source profiles' conventions.
+> **Note:** the exact shape of `android_emulator.json` as merged in PR #52 wasn't fully visible in the diff pulled for this doc - confirm the live file in the `updates` branch matches what your matrix-profile loader (`load_matrix_source_profiles()`) expects, and add any additional fields it requires (e.g. a display name or command alias) to match your other source profiles' conventions.
 
-Once the profile exists, the source should be selectable the same way any other hardware source is — through whatever `/​<COMMAND_NAME> start` (or equivalent) selection command the bot already exposes for choosing a source by `type`.
+Once the profile exists, the source should be selectable the same way any other hardware source is - through whatever `/​<COMMAND_NAME> start` (or equivalent) selection command the bot already exposes for choosing a source by `type`.
 
 ---
 
@@ -114,11 +114,11 @@ Once the profile exists, the source should be selectable the same way any other 
 1. Make sure the bot is deployed with the updated `Dockerfile`/`docker-compose.yml` (§4).
 2. Select the Android emulator source through the bot's normal source-selection command.
 3. The bot will:
-   - Probe the host for KVM and pass it through automatically if present — no setup needed on either ARM or x86_64.
-   - Spin up the `android` container (first run may take a while — the emulator image is large, and boot time depends heavily on whether KVM is available).
+   - Probe the host for KVM and pass it through automatically if present - no setup needed on either ARM or x86_64.
+   - Spin up the `android` container (first run may take a while - the emulator image is large, and boot time depends heavily on whether KVM is available).
    - Wait for the container to report genuinely **healthy** before bridging audio.
    - Start streaming whatever audio the Android emulator produces into your target voice channel.
-4. Stop the source (or switch to a different one) the same way you'd stop any other source — this tears down the compose stack, clears the web UI credential, and kills the bridge process automatically.
+4. Stop the source (or switch to a different one) the same way you'd stop any other source - this tears down the compose stack, clears the web UI credential, and kills the bridge process automatically.
 
 ### Verifying it's working
 
@@ -137,14 +137,14 @@ ps aux | grep "tail -f"
 
 ## 7. Web UI
 
-The emulator image ships a browser-based UI (KasmVNC) for interacting with the Android instance directly — useful for installing/launching apps manually, debugging, or just watching what's on screen.
+The emulator image ships a browser-based UI (KasmVNC) for interacting with the Android instance directly - useful for installing/launching apps manually, debugging, or just watching what's on screen.
 
-**Status: initial version implemented** (see `patches/android_emulator_updates.py` for the code, applied against this PR's diff — not yet merged/tested in the live repo).
+**Status: initial version implemented** (see `patches/android_emulator_updates.py` for the code, applied against this PR's diff - not yet merged/tested in the live repo).
 
 How it works:
 
 - On every source start, a random one-time password is generated and baked into the generated compose YAML (`PASSWORD=...`), along with `CUSTOM_PORT=$ANDROID_WEB_PORT`.
-- A new `/​<COMMAND_NAME> android-ui` command hands the URL + current password to the requesting user via an **ephemeral** reply — never posted where others in the channel can see it.
+- A new `/​<COMMAND_NAME> android-ui` command hands the URL + current password to the requesting user via an **ephemeral** reply - never posted where others in the channel can see it.
 - The credential is cleared automatically when the source stops.
 
 To use it:
@@ -155,8 +155,8 @@ To use it:
 
 **Known limitations of this first version** (tracked in `memory/security-concerns.md` and `memory/android-emulator-source.md`):
 
-- No reverse proxy / TLS — the UI is reached directly over `network_mode: host`, protected only by the generated password.
-- The command's permission gating needs to be matched to whatever check the repo's other privileged `/​<COMMAND_NAME>` subcommands already use — flagged as a required step before merge, not yet wired up in the patch.
+- No reverse proxy / TLS - the UI is reached directly over `network_mode: host`, protected only by the generated password.
+- The command's permission gating needs to be matched to whatever check the repo's other privileged `/​<COMMAND_NAME>` subcommands already use - flagged as a required step before merge, not yet wired up in the patch.
 
 ---
 
@@ -164,10 +164,10 @@ To use it:
 
 | Symptom | Likely cause |
 |---|---|
-| `❌ [Docker] Android emulator start failed` in logs | `docker compose up -d` failed — check `docker.sock` is mounted and the bot container's user can access it. |
-| `❌ [Docker] docker CLI not found in the bot container` | `docker.io` didn't get installed, or you're running an older image — rebuild with `--no-cache`. |
-| `⚠️ [Docker] Android container did not report healthy within Ns` | Emulator is slow to boot (expected without KVM — see §1a) or something is actually wrong. Increase `ANDROID_STARTUP_TIMEOUT_S` if it's just slow; check `docker logs` on the android container if it never comes up at all. |
-| No audio in the voice channel, no errors | The shared volume path (`android_output` → `/data/android_output/emulator_audio.pcm`) may not match what's actually running inside the emulator — confirm the emulator (or an app on it) is actually producing PCM output at that path. |
+| `❌ [Docker] Android emulator start failed` in logs | `docker compose up -d` failed - check `docker.sock` is mounted and the bot container's user can access it. |
+| `❌ [Docker] docker CLI not found in the bot container` | `docker.io` didn't get installed, or you're running an older image - rebuild with `--no-cache`. |
+| `⚠️ [Docker] Android container did not report healthy within Ns` | Emulator is slow to boot (expected without KVM - see §1a) or something is actually wrong. Increase `ANDROID_STARTUP_TIMEOUT_S` if it's just slow; check `docker logs` on the android container if it never comes up at all. |
+| No audio in the voice channel, no errors | The shared volume path (`android_output` → `/data/android_output/emulator_audio.pcm`) may not match what's actually running inside the emulator - confirm the emulator (or an app on it) is actually producing PCM output at that path. |
 | Old compose files piling up in `/tmp` | If the bot process crashes between writing the compose file and later cleanup, the temp file and possibly the running container can be orphaned. Periodically check `docker compose ls` / `/tmp/docker-compose.android.*.yml` for leftovers. |
 | `android-ui` gives an unreachable link | `ANDROID_WEB_HOST` isn't set, or isn't reachable from where the user is connecting from (e.g. it's a LAN IP and they're off-network). |
 
@@ -175,7 +175,7 @@ To use it:
 
 ## 9. Known gaps / things to verify before production use
 
-- **`sources/android_emulator.json`'s exact schema** wasn't fully visible during this doc's writing — confirm against the live file.
-- **No automated tests cover this path yet** — treat it as beta until `_spawn_android_emulator_stack`, the compose-teardown path, and the `android-ui` command have direct test coverage.
-- **Web UI hardening** (reverse proxy/TLS, permission gating) is a known follow-up, not yet done — see `memory/security-concerns.md`.
-- **`sources/android_apps.json` app auto-provisioning** is still just a plan, not implemented — see `memory/android-emulator-source.md` §3.
+- **`sources/android_emulator.json`'s exact schema** wasn't fully visible during this doc's writing - confirm against the live file.
+- **No automated tests cover this path yet** - treat it as beta until `_spawn_android_emulator_stack`, the compose-teardown path, and the `android-ui` command have direct test coverage.
+- **Web UI hardening** (reverse proxy/TLS, permission gating) is a known follow-up, not yet done - see `memory/security-concerns.md`.
+- **`sources/android_apps.json` app auto-provisioning** is still just a plan, not implemented - see `memory/android-emulator-source.md` §3.
