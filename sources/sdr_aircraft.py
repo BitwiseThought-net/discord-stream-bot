@@ -13,6 +13,7 @@ rtl_fm/USB-chipset-specific logic lives in this one file -- if
 source fails to discover anything.
 """
 
+import os
 import subprocess
 
 SOURCE_TYPE = "sdr_aircraft"
@@ -25,12 +26,40 @@ DESCRIPTION = "Aircraft (ADS-B)"
 # they're already on the admin-maintained allowlist.
 REQUIRED_PACKAGES = ["usbutils", "rtl-sdr", "sox", "libsox-fmt-all", "ffmpeg"]
 
-# RTL2832U-based dongles report this vendor:product USB ID (or the "rtl2832"
-# string somewhere in lsusb's description of the device).
-USB_CHIPSET_ID = "0bda:2838"
+# RTL2832U-based dongles report this vendor:product USB ID.
+USB_VENDOR_ID = "0bda"
+USB_PRODUCT_ID = "2838"
+USB_CHIPSET_ID = f"{USB_VENDOR_ID}:{USB_PRODUCT_ID}"
+SYSFS_USB_DEVICES = "/sys/bus/usb/devices"
 
 
 def _rtl_sdr_dongle_present() -> bool:
+    """Checks sysfs directly for a device reporting the RTL2832U
+    vendor:product ID. Deliberately avoids relying on `lsusb`'s
+    human-readable output -- that text depends on usbutils' own USB-ID
+    name database, which can fail to load (seen in the wild as an
+    "unable to initialize usb spec" warning) and silently produce a
+    truncated device list even though the kernel/sysfs still sees the
+    device fine. sysfs is just raw kernel-reported integers, so it isn't
+    affected by that failure mode.
+    """
+    try:
+        for entry in os.listdir(SYSFS_USB_DEVICES):
+            try:
+                with open(os.path.join(SYSFS_USB_DEVICES, entry, "idVendor")) as vf:
+                    vendor = vf.read().strip().lower()
+                with open(os.path.join(SYSFS_USB_DEVICES, entry, "idProduct")) as pf:
+                    product = pf.read().strip().lower()
+            except (FileNotFoundError, NotADirectoryError, IsADirectoryError):
+                continue
+            if vendor == USB_VENDOR_ID and product == USB_PRODUCT_ID:
+                return True
+    except Exception:
+        pass
+
+    # Fallback: lsusb, in case sysfs isn't available on this host at all
+    # (e.g. non-Linux). Kept as a secondary check only -- see docstring
+    # above for why it isn't trusted as the primary source of truth.
     try:
         result = subprocess.run(["lsusb"], capture_output=True, text=True, timeout=5.0)
         usb_output = result.stdout.lower()
