@@ -5,8 +5,9 @@ import asyncio
 import re
 import signal
 import shutil
-import array
 import subprocess
+import importlib.util
+import uuid
 from typing import Optional
 from datetime import datetime, timedelta
 import discord
@@ -20,6 +21,54 @@ except ImportError:
     NUMPY_AVAILABLE = False
 
 # =========================================================================
+# SOURCE PLUGIN CONTRACT
+# =========================================================================
+# Every audio source lives as one self-contained .py file inside SOURCES_DIR.
+# Dropping a correctly-implemented file in enables that source; deleting the
+# file removes it -- bot.py itself never mentions a specific source by name,
+# imports nothing from sources/ at import-time, and never assumes any
+# particular source is present. A source file that fails to load, or whose
+# functions raise, only takes that one source offline; it can't affect any
+# other source or crash the bot, because every call into a source module is
+# wrapped in try/except at the boundary below.
+#
+# A source module must define:
+#
+#   SOURCE_TYPE: str
+#       Unique identifier for this source (should be stable across restarts;
+#       it's persisted to disk so the bot can restore the last-selected
+#       source on reboot).
+#
+#   DESCRIPTION: str
+#       Human readable default label.
+#
+#   discover() -> list[dict]
+#       Returns one dict per concrete, currently-available instance of this
+#       source (e.g. one per USB sound card actually plugged in). Return []
+#       if nothing is currently available. Must not raise; if it does, the
+#       source is treated as unavailable for that scan. Each dict may set:
+#         "device"      -- str, unique-enough id for this instance
+#         "channels"    -- str, e.g. "1" or "2" (default "2")
+#         "description" -- str, human label shown to users
+#
+#   build_command(instance: dict, frequency: str, fifo_pipe: str) -> str
+#       Returns a shell pipeline (may use `|`) that writes raw
+#       signed-16-bit-little-endian, 48kHz, stereo PCM into fifo_pipe.
+#       `instance` is one of the dicts discover() returned; `frequency` is
+#       the bot's currently tuned channel string (e.g. "94.9M").
+#
+# A source module may optionally define:
+#
+#   probe_signal(instance: dict) -> tuple[str, str]
+#       Live "is this instance actually receiving something" check, used by
+#       `/radio input` (listing) and `/radio auto`. Returns
+#       (status, detail) where status is one of "signal" / "silent" /
+#       "error". Sources that can't meaningfully be probed (e.g. there's
+#       only ever one instance, so there's nothing to disambiguate) should
+#       simply not define this function.
+# =========================================================================
+
+# =========================================================================
 # 1. ENVIRONMENT CONFIGURATION & DATA INSTANTIATIONS
 # =========================================================================
 DISCORD_TOKEN = os.getenv('DISCORD_TOKEN')
@@ -30,7 +79,7 @@ DATA_DIR = os.getenv('DATA_DIR', '/data')
 STATE_FILE = os.getenv('STATE_FILE', os.path.join(DATA_DIR, 'state.json'))
 SOURCES_CACHE_FILE = os.getenv('SOURCES_CACHE_FILE', os.path.join(DATA_DIR, 'sources_cache.json'))
 FIFO_PIPE = os.getenv('FIFO_PIPE', os.path.join(DATA_DIR, 'audio_pipe'))      # Continuous shared audio stream buffer
-SOURCES_DIR = os.getenv('SOURCES_DIR', '/sources')            # Configuration directory holding isolated profiles
+SOURCES_DIR = os.getenv('SOURCES_DIR', '/sources')            # Directory of pluggable, self-contained source .py files
 
 CURRENT_TUNED_CHANNEL = "94.9M"
 CURRENT_VOLUME_LEVEL = 1.0          # Global persistent tracking memory register for volume level
@@ -118,110 +167,109 @@ def clear_stream_state():
     except Exception as e:
         print(f"⚠️ [State Storage] Failed updating connection state parameters: {e}")
 # =========================================================================
-# 3. SELF-HEALING CONFIGURATION-DRIVEN HARDWARE DISCOVERY PROTOCOLS
+# 3. PLUGGABLE SOURCE LOADING & HARDWARE DISCOVERY
 # =========================================================================
-def self_heal_test_signal_profile():
-    """Enforces absolute baseline system stability by auto-healing the fallback matrix file if deleted."""
-    target_path = os.path.join(SOURCES_DIR, "test_signal.json")
-    if not os.path.exists(target_path):
-        print("📁 [Self-Healing] test_signal.json missing from profiles folder. Re-seeding baseline code...")
-        payload = {
-            "type": "test_signal",
-            "description": "🛠️ Diagnostic Test Signal (Analog Calibration Tone)",
-            "discovery_trigger": "always_available",
-            "pipeline_template": "ffmpeg -y -f lavfi -i \"sine=frequency=440:sample_rate=48000\" -f s16le -ar 48k -ac 2 pipe:1 >> {fifo_pipe}"
-        }
+# This is the *only* generic, hardcoded audio source in bot.py. It exists
+# purely as an emergency safety net for the case where SOURCES_DIR is empty
+# or every source file in it fails to load -- it depends on nothing from
+# sources/ and knows nothing about any pluggable source's hardware, so it
+# can never be broken by removing or breaking a source .py file.
+BUILTIN_FALLBACK_TYPE = "builtin_silence_guard"
+BUILTIN_FALLBACK_SOURCE = {
+    "type": BUILTIN_FALLBACK_TYPE,
+    "device": "builtin",
+    "channels": "2",
+    "description": "⚙️ Built-in Fallback Tone (no source plugins available)",
+}
+
+
+def _builtin_fallback_command(fifo_pipe: str) -> str:
+    return (
+        'ffmpeg -y -f lavfi -i "sine=frequency=440:sample_rate=48000" '
+        f'-f s16le -ar 48k -ac 2 pipe:1 >> {fifo_pipe}'
+    )
+
+
+def load_source_modules():
+    """Dynamically imports every .py file in SOURCES_DIR and returns a dict of
+    SOURCE_TYPE -> module for every file that implements the plugin contract
+    (see the "SOURCE PLUGIN CONTRACT" note near the top of this file).
+
+    Loaded fresh from disk every call (rather than relying on Python's module
+    cache) so that dropping a new or updated file into SOURCES_DIR takes
+    effect immediately, and deleting a file makes it disappear immediately --
+    no restart required either way.
+
+    A file that fails to import, or that doesn't expose the required names,
+    is skipped with a warning; it cannot affect any other file or crash the
+    bot.
+    """
+    modules = {}
+    try:
+        filenames = sorted(os.listdir(SOURCES_DIR))
+    except Exception as e:
+        print(f"⚠️ [Source Loader] Failed listing {SOURCES_DIR}: {e}")
+        return modules
+
+    for filename in filenames:
+        if not filename.endswith(".py") or filename.startswith("_"):
+            continue
+        file_path = os.path.join(SOURCES_DIR, filename)
+        module_name = f"discord_stream_bot_source_{filename[:-3]}_{uuid.uuid4().hex}"
         try:
-            with open(target_path, 'w') as f:
-                json.dump(payload, f, indent=4)
+            spec = importlib.util.spec_from_file_location(module_name, file_path)
+            module = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(module)
+
+            source_type = getattr(module, "SOURCE_TYPE", None)
+            discover_fn = getattr(module, "discover", None)
+            build_command_fn = getattr(module, "build_command", None)
+            if not isinstance(source_type, str) or not source_type:
+                print(f"⚠️ [Source Loader] {filename} has no valid SOURCE_TYPE, skipping.")
+                continue
+            if not callable(discover_fn) or not callable(build_command_fn):
+                print(f"⚠️ [Source Loader] {filename} is missing discover()/build_command(), skipping.")
+                continue
+
+            if source_type in modules:
+                print(f"⚠️ [Source Loader] Duplicate SOURCE_TYPE '{source_type}' in {filename}, keeping the first one loaded.")
+                continue
+
+            modules[source_type] = module
         except Exception as e:
-            print(f"⚠️ [Self-Healing] Failed to write fallback matrix file layout profile: {e}")
+            print(f"⚠️ [Source Loader] Failed loading {filename}, that source will be unavailable: {e}")
 
-def load_matrix_source_profiles():
-    """Reads profile files from /sources with purely read-only permissions, executing self-healing first."""
-    self_heal_test_signal_profile()
-    profiles = {}
+    return modules
 
-    for filename in sorted(os.listdir(SOURCES_DIR)):
-        if filename.endswith(".json"):
-            try:
-                with open(os.path.join(SOURCES_DIR, filename), 'r') as f:
-                    data = json.load(f)
-                    if "type" in data:
-                        profiles[data["type"]] = data
-            except Exception as e:
-                print(f"⚠️ [Matrix Loader] Failed parsing file profile {filename}: {e}")
-    return profiles
 
 def discover_hardware_profile():
-    """Scans hardware registers and guarantees index 0 is locked exclusively to the diagnostic backdoor."""
+    """Asks every loaded source module what's currently available and
+    flattens the results into a single catalog list, caching it to disk for
+    the other commands that resolve against it.
+
+    Each source module is only ever asked about itself -- a module raising
+    from discover() only removes that one source from the catalog for this
+    scan; it can't take down discovery for any other source.
+    """
     available_sources = []
-    matrix_profiles = load_matrix_source_profiles()
-    base_dir = "/proc/asound"
+    modules = load_source_modules()
 
-    # FIXED: Index 0 is explicitly locked to the virtual test engine baseline entry first
-    test_config = matrix_profiles.get("test_signal", {
-        "type": "test_signal",
-        "description": "🛠️ Diagnostic Test Signal (Analog Calibration Tone)"
-    })
-    available_sources.append({
-        "type": "test_signal",
-        "device": "virtual",
-        "channels": "2",
-        "description": test_config.get("description")
-    })
+    for source_type, module in modules.items():
+        try:
+            instances = module.discover() or []
+        except Exception as e:
+            print(f"⚠️ [Discovery] Source '{source_type}' raised while discovering, skipping it: {e}")
+            continue
 
-    try:
-        usb_check = subprocess.run(["lsusb"], capture_output=True, text=True)
-        usb_output = usb_check.stdout.lower()
-    except Exception:
-        usb_output = ""
+        for instance in instances:
+            entry = dict(instance)
+            entry["type"] = source_type
+            entry.setdefault("channels", "2")
+            entry.setdefault("description", getattr(module, "DESCRIPTION", source_type))
+            available_sources.append(entry)
 
-    # Scan and append detected hardware profiles behind index 0
-    for s_type, config in matrix_profiles.items():
-        if s_type == "test_signal":
-            continue  # Already locked to position 0
-
-        trigger = config.get("discovery_trigger", "")
-
-        # 1. ALSA PROBE GATES
-        if trigger == "alsa_sound_card" and os.path.exists(base_dir):
-            try:
-                cards = [d for d in os.listdir(base_dir) if d.startswith("card") and os.path.isdir(os.path.join(base_dir, d))]
-                for card in sorted(cards):
-                    card_index = card.replace("card", "")
-                    device_string = f"plughw:{card_index},0"
-                    channels = "2"
-                    label_template = config.get("description", "USB Microphone ({device})")
-
-                    stream_info = os.path.join(base_dir, card, "usbstream")
-                    if not os.path.exists(stream_info):
-                        stream_info = os.path.join(base_dir, card, "stream0")
-                    if os.path.exists(stream_info):
-                        with open(stream_info, 'r') as f:
-                            if "1 channel" in f.read().lower():
-                                channels = "1"
-                                label_template = config.get("mono_description", "USB Mono Microphone ({device})")
-
-                    available_sources.append({
-                        "type": s_type,
-                        "device": device_string,
-                        "channels": channels,
-                        "description": label_template.format(device=device_string)
-                    })
-            except Exception as e:
-                print(f"⚠️ ALSA file matrix scan exception: {e}")
-
-        # 2. SDR PROBE GATES
-        elif trigger.startswith("usb_chipset_"):
-            target_id = trigger.replace("usb_chipset_", "").lower()
-            if target_id in usb_output or "rtl2832" in usb_output:
-                available_sources.append({
-                    "type": s_type,
-                    "device": "rtlsdr",
-                    "channels": "1",
-                    "description": config.get("description", f"SDR Module Channel Capture ({s_type})")
-                })
+    if not available_sources:
+        available_sources.append(dict(BUILTIN_FALLBACK_SOURCE))
 
     try:
         os.makedirs(os.path.dirname(SOURCES_CACHE_FILE), exist_ok=True)
@@ -232,74 +280,26 @@ def discover_hardware_profile():
 
     return available_sources
 
-def probe_device_has_signal(device: str, duration: float = 0.3, rms_threshold: float = 50.0):
-    """Records a short raw snippet directly from an ALSA capture device and checks for
-    non-silence via RMS amplitude. Used to auto-detect which of several identical
-    USB microphone entries is actually the one receiving live audio, since vendor
-    ID / card index alone can't distinguish between otherwise-identical hardware.
 
-    Returns a (status, detail) tuple instead of a bare bool:
-      status == "signal" : audio captured, RMS above threshold
-      status == "silent" : device opened and captured fine, RMS below threshold
-      status == "error"  : could not get a real reading at all -- device busy,
-                            arecord missing, unsupported format/rate, permission
-                            denied on /dev/snd, timeout, etc. This is NOT the same
-                            as silence: a previous version of this function caught
-                            every one of these failure modes with a blanket
-                            `except Exception: return False`, which made a busy
-                            or misconfigured device look identical to a genuinely
-                            silent one in `/radio input` (list mode) output. Surfacing the
-                            failure mode separately lets you tell "nothing plugged
-                            in" apart from "the probe itself couldn't run."
+def scan_sources_for_signal(sources, modules=None):
+    """Probes every source instance whose module implements probe_signal()
+    and returns a dict of device -> (status, detail). Sources that don't
+    define probe_signal() (nothing to disambiguate) are left out of the map
+    entirely, and a probing module that raises only drops that one entry."""
+    if modules is None:
+        modules = load_source_modules()
 
-    NOTE: if the bot is *currently* streaming from this exact device via the FIFO
-    pipeline, arecord will typically fail to open it (device busy) -- that will
-    now show up explicitly as an "error" with a busy/in-use detail rather than
-    silently reporting "silent".
-    """
-    if not device or not device.startswith("plughw"):
-        return ("error", "not a probeable ALSA device")
-
-    if shutil.which("arecord") is None:
-        return ("error", "arecord not found on PATH -- install alsa-utils in the container image")
-
-    try:
-        result = subprocess.run(
-            ["arecord", "-D", device, "-f", "S16_LE", "-r", "48000",
-             "-c", "1", "-d", str(duration), "-t", "raw"],
-            capture_output=True, timeout=duration + 2.0
-        )
-    except subprocess.TimeoutExpired:
-        return ("error", "arecord timed out opening the device")
-    except Exception as e:
-        return ("error", f"failed to launch arecord: {e}")
-
-    if result.returncode != 0:
-        stderr_text = result.stderr.decode(errors="ignore").strip()
-        last_line = stderr_text.splitlines()[-1] if stderr_text else f"exit code {result.returncode}"
-        return ("error", last_line)
-
-    raw = result.stdout
-    if len(raw) < 2:
-        return ("error", "arecord exited cleanly but returned no audio bytes")
-
-    samples = array.array('h', raw[: len(raw) - (len(raw) % 2)])
-    if not samples:
-        return ("error", "empty sample buffer after capture")
-
-    rms = (sum(s * s for s in samples) / len(samples)) ** 0.5
-    if rms > rms_threshold:
-        return ("signal", f"rms={rms:.1f}")
-    return ("silent", f"rms={rms:.1f}")
-
-def scan_sources_for_signal(sources):
-    """Probes every plughw-backed source entry and returns a dict of
-    device -> (status, detail), see probe_device_has_signal for status meanings."""
     signal_map = {}
     for src in sources:
+        module = modules.get(src.get("type"))
+        probe_fn = getattr(module, "probe_signal", None) if module else None
+        if not callable(probe_fn):
+            continue
         device = src.get("device", "")
-        if device.startswith("plughw"):
-            signal_map[device] = probe_device_has_signal(device)
+        try:
+            signal_map[device] = probe_fn(src)
+        except Exception as e:
+            signal_map[device] = ("error", f"probe_signal raised: {e}")
     return signal_map
 # =========================================================================
 # 4. BROADCAST CORE PIPELINE HANDLERS
@@ -341,28 +341,39 @@ def stop_active_hardware_process():
             setattr(bot, proc_attr, None)
 
 def spawn_hardware_capture_stream(active_source):
-    """Parses shell parameters dynamically from separate JSON profiles and spawns arrays."""
+    """Asks the source module that owns this instance's type for the shell
+    pipeline to run, then spawns it. bot.py never constructs a pipeline
+    itself -- it only ever forwards to build_command() on the relevant
+    source module, so it has no knowledge of any particular source's
+    hardware or tooling.
+
+    If the resolved source is the built-in emergency fallback (no source
+    module owns it), or the owning module can't be loaded / raises while
+    building the command, we fall back to the same tiny built-in tone so a
+    broken or removed source degrades gracefully instead of leaving the
+    pipeline silently dead.
+    """
     global CURRENT_TUNED_CHANNEL
     s_type = active_source["type"]
 
     stop_active_hardware_process()
 
-    matrix_profiles = load_matrix_source_profiles()
-    if s_type not in matrix_profiles:
-        print(f"❌ [Pipeline Lock] Configuration map profile missing for type: {s_type}")
-        return
+    compiled_pipeline = None
+    if s_type != BUILTIN_FALLBACK_TYPE:
+        modules = load_source_modules()
+        module = modules.get(s_type)
+        if module is None:
+            print(f"⚠️ [Pipeline Lock] Source '{s_type}' is no longer available (file removed or failed to load). Falling back to the built-in tone.")
+        else:
+            try:
+                compiled_pipeline = module.build_command(
+                    active_source, frequency=CURRENT_TUNED_CHANNEL, fifo_pipe=FIFO_PIPE
+                )
+            except Exception as e:
+                print(f"⚠️ [Pipeline Lock] Source '{s_type}' raised while building its pipeline, falling back to the built-in tone: {e}")
 
-    raw_template = matrix_profiles[s_type].get("pipeline_template", "")
-    if not raw_template:
-        print(f"❌ [Pipeline Lock] Explicit template structure empty inside configuration profile: {s_type}")
-        return
-
-    compiled_pipeline = raw_template.format(
-        frequency=CURRENT_TUNED_CHANNEL,
-        device=active_source.get("device", ""),
-        channels=active_source.get("channels", "2"),
-        fifo_pipe=FIFO_PIPE
-    )
+    if not compiled_pipeline:
+        compiled_pipeline = _builtin_fallback_command(FIFO_PIPE)
 
     bot.hardware_process = subprocess.Popen(
         compiled_pipeline,
@@ -375,7 +386,7 @@ def spawn_hardware_capture_stream(active_source):
 def resolve_active_source(detected_sources, target_source_type, target_device=None):
     """Resolves a specific hardware entry from the cache.
 
-    A profile `type` (e.g. "usb_mic") can fan out into several distinct hardware
+    A source `type` (e.g. "alsa") can fan out into several distinct hardware
     entries that only differ by `device` (e.g. plughw:0,0 vs plughw:3,0). Matching
     on `type` alone always returns the *first* entry with that type, silently
     collapsing every USB microphone selection onto mic 0. We match on the
@@ -392,7 +403,7 @@ def resolve_active_source(detected_sources, target_source_type, target_device=No
     if active_source is None:
         active_source = next((s for s in detected_sources if s["type"] == target_source_type), None)
     if active_source is None:
-        active_source = detected_sources[0] if detected_sources else {"type": "test_signal", "description": "Diagnostic Fallback"}
+        active_source = detected_sources[0] if detected_sources else dict(BUILTIN_FALLBACK_SOURCE)
     return active_source
 
 async def execute_stream_pipeline(interaction: discord.Interaction, channel: discord.VoiceChannel,
@@ -549,9 +560,6 @@ async def set_input(interaction: discord.Interaction, index: Optional[int] = Non
         error_count = 0
 
         for idx, src in enumerate(sources):
-            if src["type"] == "test_signal":
-                continue
-
             visible_count += 1
             device = src.get("device", "")
             line = f"`{idx}` : {src['description']}"
@@ -615,18 +623,22 @@ async def auto_input(interaction: discord.Interaction):
     await interaction.response.defer(ephemeral=False)
 
     sources = discover_hardware_profile()
-    mic_sources = [s for s in sources if s.get("device", "").startswith("plughw")]
+    modules = load_source_modules()
+    probeable_sources = [s for s in sources if callable(getattr(modules.get(s.get("type")), "probe_signal", None))]
 
-    if not mic_sources:
-        await interaction.followup.send("⚠️ No USB microphone interfaces detected to scan.")
+    if not probeable_sources:
+        await interaction.followup.send("⚠️ No probeable input interfaces detected to scan.")
         return
 
-    await interaction.followup.send(f"🔎 Probing {len(mic_sources)} microphone interface(s) for live signal...")
+    await interaction.followup.send(f"🔎 Probing {len(probeable_sources)} interface(s) for live signal...")
 
     live_source = None
     probe_errors = []
-    for src in mic_sources:
-        status, detail = probe_device_has_signal(src["device"])
+    for src in probeable_sources:
+        try:
+            status, detail = modules[src["type"]].probe_signal(src)
+        except Exception as e:
+            status, detail = ("error", f"probe_signal raised: {e}")
         if status == "signal":
             live_source = src
             break
