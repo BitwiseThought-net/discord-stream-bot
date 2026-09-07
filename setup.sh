@@ -123,19 +123,7 @@ fi
 ENV_GENERATED=false
 if [ ! -f .env ]; then
     echo -e "\n📝 Environment setup missing! Creating a new configuration template..."
-    cat << EOF > .env
-# Application Gateway Token
-DISCORD_TOKEN=your_actual_discord_bot_token_here
-
-# Customizable Application Slash Root Scope Name
-COMMAND_BASE=radio
-
-# Crash Recovery Automation Routing Profile Type
-RECOVERY_MODE=resume
-
-# Baseline Broadcast Spectrum Target Frequency Location (e.g. 94.9M)
-SDR_FREQUENCY=94.9M
-EOF
+    cp .env.example .env
     ENV_GENERATED=true
 fi
 
