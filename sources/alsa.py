@@ -24,6 +24,13 @@ SOURCE_TYPE = "alsa"
 DESCRIPTION = "USB Microphone ({device})"
 MONO_DESCRIPTION = "USB Mono Microphone ({device})"
 
+# Debian/apt package names this file's build_command()/probe_signal() shell
+# out to (ffmpeg for capture, alsa-utils for arecord). Purely declarative --
+# see the SOURCE PLUGIN CONTRACT note in bot.py. bot.py is the only thing
+# that ever installs these, and only if they're already on the
+# admin-maintained allowlist.
+REQUIRED_PACKAGES = ["ffmpeg", "alsa-utils"]
+
 ASOUND_DIR = "/proc/asound"
 
 

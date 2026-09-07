@@ -25,6 +25,12 @@ bot.py falls back to its own tiny built-in emergency tone in that case.
 SOURCE_TYPE = "test_signal"
 DESCRIPTION = "🛠️ Diagnostic Test Signal (Analog Calibration Tone)"
 
+# Debian/apt package names this file's build_command() shells out to.
+# Purely declarative -- see the SOURCE PLUGIN CONTRACT note in bot.py.
+# bot.py is the only thing that ever installs these, and only if they're
+# already on the admin-maintained allowlist.
+REQUIRED_PACKAGES = ["ffmpeg"]
+
 
 def discover():
     """Always available -- no hardware dependency at all."""

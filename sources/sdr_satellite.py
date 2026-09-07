@@ -18,6 +18,13 @@ import subprocess
 SOURCE_TYPE = "sdr_satellite"
 DESCRIPTION = "Weather Satellite Data"
 
+# Debian/apt package names this file shells out to: usbutils for lsusb,
+# rtl-sdr for rtl_fm, sox/libsox-fmt-all for resampling, ffmpeg for the
+# final stage. Purely declarative -- see the SOURCE PLUGIN CONTRACT note in
+# bot.py. bot.py is the only thing that ever installs these, and only if
+# they're already on the admin-maintained allowlist.
+REQUIRED_PACKAGES = ["usbutils", "rtl-sdr", "sox", "libsox-fmt-all", "ffmpeg"]
+
 # RTL2832U-based dongles report this vendor:product USB ID (or the "rtl2832"
 # string somewhere in lsusb's description of the device).
 USB_CHIPSET_ID = "0bda:2838"
