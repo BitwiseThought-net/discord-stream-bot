@@ -66,6 +66,18 @@ except ImportError:
 #       "error". Sources that can't meaningfully be probed (e.g. there's
 #       only ever one instance, so there's nothing to disambiguate) should
 #       simply not define this function.
+#
+#   REQUIRED_PACKAGES: list[str]
+#       Debian/apt package names (matching this project's Docker base image)
+#       that this source's discover()/build_command()/probe_signal() shell
+#       out to (e.g. ["ffmpeg", "alsa-utils"]). This is purely a declaration
+#       of names -- listing a package here never runs anything and never
+#       gives the source any ability to execute its own install commands.
+#       bot.py is the only thing that ever installs a package, and only for
+#       names that already appear in the admin-maintained allowlist file;
+#       anything else is just logged and optionally reported to a webhook
+#       for an admin to review. See "DEPENDENCY WHITELISTING & AUTO-INSTALL"
+#       below for details.
 # =========================================================================
 
 # =========================================================================
@@ -80,6 +92,21 @@ STATE_FILE = os.getenv('STATE_FILE', os.path.join(DATA_DIR, 'state.json'))
 SOURCES_CACHE_FILE = os.getenv('SOURCES_CACHE_FILE', os.path.join(DATA_DIR, 'sources_cache.json'))
 FIFO_PIPE = os.getenv('FIFO_PIPE', os.path.join(DATA_DIR, 'audio_pipe'))      # Continuous shared audio stream buffer
 SOURCES_DIR = os.getenv('SOURCES_DIR', '/sources')            # Directory of pluggable, self-contained source .py files
+
+# Dependency whitelisting/auto-install -- see "DEPENDENCY WHITELISTING &
+# AUTO-INSTALL" section below for what these do.
+PACKAGE_ALLOWLIST_FILE = os.getenv('PACKAGE_ALLOWLIST_FILE', os.path.join(DATA_DIR, 'package_allowlist.json'))
+DEPENDENCY_WEBHOOK_URL = os.getenv('DEPENDENCY_WEBHOOK_URL')   # optional; e.g. a private Discord webhook for admin review
+PACKAGE_MANAGER_UPDATE_CMD = os.getenv('PACKAGE_MANAGER_UPDATE_CMD', 'apt-get update').split()
+PACKAGE_MANAGER_INSTALL_CMD = os.getenv('PACKAGE_MANAGER_INSTALL_CMD', 'apt-get install -y').split()
+PACKAGE_MANAGER_CHECK_CMD = os.getenv('PACKAGE_MANAGER_CHECK_CMD', 'dpkg -s').split()
+
+# Packages this project's own Dockerfile already bakes into the image --
+# used to seed a brand-new allowlist file so day-one deployments aren't
+# reporting their own built-in sources as "unknown" the moment they boot.
+DEFAULT_PACKAGE_ALLOWLIST = [
+    "ffmpeg", "alsa-utils", "usbutils", "sox", "libsox-fmt-all", "rtl-sdr", "librtlsdr-dev"
+]
 
 CURRENT_TUNED_CHANNEL = "94.9M"
 CURRENT_VOLUME_LEVEL = 1.0          # Global persistent tracking memory register for volume level
@@ -301,6 +328,157 @@ def scan_sources_for_signal(sources, modules=None):
         except Exception as e:
             signal_map[device] = ("error", f"probe_signal raised: {e}")
     return signal_map
+
+# =========================================================================
+# 3B. DEPENDENCY WHITELISTING & AUTO-INSTALL
+# =========================================================================
+# Sources only ever *declare* the apt packages they need via
+# REQUIRED_PACKAGES (see the SOURCE PLUGIN CONTRACT above) -- they never run
+# an install command themselves. bot.py is the sole thing that ever invokes
+# the package manager, and only for names that already appear in the
+# admin-maintained PACKAGE_ALLOWLIST_FILE. A declared package that ISN'T on
+# the allowlist is never installed automatically; it's only logged and,
+# if DEPENDENCY_WEBHOOK_URL is configured, POSTed there for an admin to
+# review and (if appropriate) add to the allowlist. This keeps the "drop a
+# .py file into sources/" workflow from ever silently escalating into
+# "run arbitrary commands as root in a privileged container".
+#
+# This assumes the Debian/apt tooling already baked into this project's own
+# Dockerfile (python:3.11-slim); PACKAGE_MANAGER_*_CMD can be overridden via
+# environment variables for a different base image, but this integration
+# has only been validated against apt/dpkg.
+PACKAGE_NAME_PATTERN = re.compile(r'^[a-zA-Z0-9][a-zA-Z0-9+.\-]*$')
+
+
+def load_package_allowlist():
+    """Reads the admin-maintained JSON allowlist of package names bot.py is
+    permitted to auto-install on a source's behalf. Seeds the file with the
+    baseline packages this project's own Dockerfile already installs if it
+    doesn't exist yet, purely so a fresh deployment isn't reporting its own
+    built-in sources as "unknown" on first boot."""
+    if not os.path.exists(PACKAGE_ALLOWLIST_FILE):
+        try:
+            os.makedirs(os.path.dirname(PACKAGE_ALLOWLIST_FILE), exist_ok=True)
+            with open(PACKAGE_ALLOWLIST_FILE, 'w') as f:
+                json.dump(DEFAULT_PACKAGE_ALLOWLIST, f, indent=4)
+            print(f"📁 [Dependency Guard] Seeded a new package allowlist at {PACKAGE_ALLOWLIST_FILE}.")
+        except Exception as e:
+            print(f"⚠️ [Dependency Guard] Failed to seed package allowlist, using the in-memory default: {e}")
+            return set(DEFAULT_PACKAGE_ALLOWLIST)
+
+    try:
+        with open(PACKAGE_ALLOWLIST_FILE, 'r') as f:
+            data = json.load(f)
+        return {pkg for pkg in data if isinstance(pkg, str) and PACKAGE_NAME_PATTERN.match(pkg)}
+    except Exception as e:
+        print(f"⚠️ [Dependency Guard] Failed reading package allowlist, treating it as empty: {e}")
+        return set()
+
+
+def collect_required_packages(modules):
+    """Gathers every loaded source module's declared REQUIRED_PACKAGES.
+    Purely reads a plain list-of-strings attribute -- nothing here executes
+    anything on behalf of a source. Returns {package_name: {source_type, ...}}
+    so callers can report which source(s) asked for a given package. A
+    malformed declaration only drops that one source's request; it doesn't
+    affect any other source."""
+    requested = {}
+    for source_type, module in modules.items():
+        declared = getattr(module, "REQUIRED_PACKAGES", [])
+        if not isinstance(declared, (list, tuple)):
+            print(f"⚠️ [Dependency Guard] Source '{source_type}' has a malformed REQUIRED_PACKAGES (not a list), ignoring it.")
+            continue
+        for pkg in declared:
+            if not isinstance(pkg, str) or not PACKAGE_NAME_PATTERN.match(pkg):
+                print(f"⚠️ [Dependency Guard] Source '{source_type}' declared an invalid package name {pkg!r}, ignoring it.")
+                continue
+            requested.setdefault(pkg, set()).add(source_type)
+    return requested
+
+
+def is_package_installed(package: str) -> bool:
+    """Cheap local check so a repeat boot doesn't re-run apt-get for
+    packages that are already present."""
+    try:
+        result = subprocess.run(PACKAGE_MANAGER_CHECK_CMD + [package], capture_output=True, timeout=10)
+        return result.returncode == 0
+    except Exception:
+        return False
+
+
+def install_package(package: str) -> bool:
+    """Installs a single already-whitelisted package. Returns True on
+    success. A failure here only affects the source(s) that need this
+    particular package -- it's caught and reported, never raised."""
+    try:
+        subprocess.run(PACKAGE_MANAGER_UPDATE_CMD, capture_output=True, timeout=120)
+        result = subprocess.run(PACKAGE_MANAGER_INSTALL_CMD + [package], capture_output=True, timeout=300)
+        if result.returncode != 0:
+            stderr_text = result.stderr.decode(errors="ignore").strip()
+            last_line = stderr_text.splitlines()[-1] if stderr_text else f"exit code {result.returncode}"
+            print(f"❌ [Dependency Guard] Failed installing '{package}': {last_line}")
+            return False
+        print(f"✅ [Dependency Guard] Installed '{package}'.")
+        return True
+    except Exception as e:
+        print(f"❌ [Dependency Guard] Exception installing '{package}': {e}")
+        return False
+
+
+def report_missing_dependency(package: str, source_types):
+    """Logs, and if DEPENDENCY_WEBHOOK_URL is configured, POSTs a notice
+    about a package that some loaded source wants but that isn't on the
+    allowlist yet -- for an admin to review and decide whether to add it."""
+    sources_list = ", ".join(sorted(source_types))
+    message = (
+        f"⚠️ Unwhitelisted package requested: `{package}` "
+        f"(needed by source(s): {sources_list}). "
+        f"Add it to `{os.path.basename(PACKAGE_ALLOWLIST_FILE)}` to allow auto-install."
+    )
+    print(f"⚠️ [Dependency Guard] {message}")
+
+    if not DEPENDENCY_WEBHOOK_URL:
+        return
+
+    try:
+        import urllib.request
+        payload = json.dumps({"content": message}).encode("utf-8")
+        req = urllib.request.Request(
+            DEPENDENCY_WEBHOOK_URL, data=payload,
+            headers={"Content-Type": "application/json"}, method="POST"
+        )
+        urllib.request.urlopen(req, timeout=10)
+    except Exception as e:
+        print(f"⚠️ [Dependency Guard] Failed posting to the dependency webhook: {e}")
+
+
+def ensure_source_dependencies_installed(modules=None):
+    """Cross-checks every loaded source's declared REQUIRED_PACKAGES against
+    the admin-maintained allowlist. Whitelisted-and-missing packages are
+    installed; anything not on the allowlist is only logged and (if
+    configured) reported to DEPENDENCY_WEBHOOK_URL -- it is never installed
+    automatically. One package failing to install, or one source declaring
+    a bad package list, only affects that package/source; every other
+    package is still processed."""
+    if modules is None:
+        modules = load_source_modules()
+
+    requested = collect_required_packages(modules)
+    if not requested:
+        return
+
+    allowlist = load_package_allowlist()
+
+    for package, source_types in requested.items():
+        if is_package_installed(package):
+            continue
+
+        if package in allowlist:
+            print(f"📦 [Dependency Guard] '{package}' is whitelisted and missing, installing for source(s): {', '.join(sorted(source_types))}...")
+            install_package(package)
+        else:
+            report_missing_dependency(package, source_types)
+
 # =========================================================================
 # 4. BROADCAST CORE PIPELINE HANDLERS
 # =========================================================================
@@ -613,6 +791,34 @@ async def set_input(interaction: discord.Interaction, index: Optional[int] = Non
                                        force_device=target_device)
     else:
         await interaction.response.send_message(f"✅ Target capture source locked to configuration file token: **{sources[index]['description']}**.")
+
+@radio_group.command(name="deps", description="Re-check every loaded source's declared package dependencies against the allowlist")
+async def check_deps(interaction: discord.Interaction):
+    await interaction.response.defer(ephemeral=True)
+
+    modules = load_source_modules()
+    requested = collect_required_packages(modules)
+    if not requested:
+        await interaction.followup.send("📦 No loaded source currently declares any package dependencies.")
+        return
+
+    allowlist = await asyncio.to_thread(load_package_allowlist)
+    lines = []
+    for package, source_types in sorted(requested.items()):
+        needed_by = ", ".join(sorted(source_types))
+        already_installed = await asyncio.to_thread(is_package_installed, package)
+        if already_installed:
+            lines.append(f"✅ `{package}` already installed (needed by {needed_by})")
+            continue
+
+        if package in allowlist:
+            installed_ok = await asyncio.to_thread(install_package, package)
+            lines.append(f"{'✅ installed' if installed_ok else '❌ install failed'} `{package}` (needed by {needed_by})")
+        else:
+            await asyncio.to_thread(report_missing_dependency, package, source_types)
+            lines.append(f"🚫 `{package}` not on the allowlist -- reported for review (needed by {needed_by})")
+
+    await interaction.followup.send("📦 **Dependency check complete:**\n" + "\n".join(lines))
 
 @radio_group.command(name="auto", description="Auto-detect and connect to whichever USB microphone is receiving live signal")
 async def auto_input(interaction: discord.Interaction):
@@ -1113,4 +1319,12 @@ async def execute_channel_scan(interaction: discord.Interaction, scan_range):
         await interaction.followup.send(response[chunk_start: chunk_start + 1900])
 
 if __name__ == "__main__":
+    # One-time, synchronous dependency pass before the bot connects: install
+    # anything a loaded source needs that's already on the allowlist, and
+    # report anything else for admin review. This runs before the event loop
+    # starts (unlike discovery scans, which happen continuously while the
+    # bot is live), so blocking here on apt-get is fine. Sources that pick
+    # up a *new* dependency later (e.g. an admin drops in an updated file)
+    # can be re-checked on demand with `/radio deps`.
+    ensure_source_dependencies_installed()
     bot.run(DISCORD_TOKEN)

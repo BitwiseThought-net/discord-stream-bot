@@ -9,6 +9,7 @@ services:
       - DISCORD_TOKEN=${DISCORD_TOKEN}
       - COMMAND_BASE=${COMMAND_BASE:-radio}
       - RECOVERY_MODE=${RECOVERY_MODE:-resume}
+      - DEPENDENCY_WEBHOOK_URL=${DEPENDENCY_WEBHOOK_URL:-}
     volumes:
       - discord_bot_data:/data
       - ./sources:/sources:ro
