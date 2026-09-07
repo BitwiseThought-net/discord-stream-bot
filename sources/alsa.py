@@ -113,10 +113,12 @@ def probe_signal(instance: dict, duration: float = 0.3, rms_threshold: float = 5
     if shutil.which("arecord") is None:
         return ("error", "arecord not found on PATH -- install alsa-utils in the container image")
 
+    sample_rate = 48000
+    frame_count = max(1, int(duration * sample_rate))
     try:
         result = subprocess.run(
-            ["arecord", "-D", device, "-f", "S16_LE", "-r", "48000",
-             "-c", "1", "-d", str(duration), "-t", "raw"],
+            ["arecord", "-D", device, "-f", "S16_LE", "-r", str(sample_rate),
+             "-c", "1", "-s", str(frame_count), "-t", "raw"],
             capture_output=True, timeout=duration + 2.0
         )
     except subprocess.TimeoutExpired:

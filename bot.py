@@ -96,6 +96,13 @@ SOURCES_DIR = os.getenv('SOURCES_DIR', '/sources')            # Directory of plu
 # Dependency whitelisting/auto-install -- see "DEPENDENCY WHITELISTING &
 # AUTO-INSTALL" section below for what these do.
 PACKAGE_ALLOWLIST_FILE = os.getenv('PACKAGE_ALLOWLIST_FILE', os.path.join(DATA_DIR, 'package_allowlist.json'))
+# Checked-in starter list (edit this before first boot to pre-approve extra
+# packages) that seeds PACKAGE_ALLOWLIST_FILE on first run. See
+# package_allowlist.example.json at the repo root.
+PACKAGE_ALLOWLIST_TEMPLATE = os.getenv(
+    'PACKAGE_ALLOWLIST_TEMPLATE',
+    os.path.join(os.path.dirname(os.path.abspath(__file__)), 'package_allowlist.example.json')
+)
 DEPENDENCY_WEBHOOK_URL = os.getenv('DEPENDENCY_WEBHOOK_URL')   # optional; e.g. a private Discord webhook for admin review
 PACKAGE_MANAGER_UPDATE_CMD = os.getenv('PACKAGE_MANAGER_UPDATE_CMD', 'apt-get update').split()
 PACKAGE_MANAGER_INSTALL_CMD = os.getenv('PACKAGE_MANAGER_INSTALL_CMD', 'apt-get install -y').split()
@@ -352,19 +359,33 @@ PACKAGE_NAME_PATTERN = re.compile(r'^[a-zA-Z0-9][a-zA-Z0-9+.\-]*$')
 
 def load_package_allowlist():
     """Reads the admin-maintained JSON allowlist of package names bot.py is
-    permitted to auto-install on a source's behalf. Seeds the file with the
-    baseline packages this project's own Dockerfile already installs if it
-    doesn't exist yet, purely so a fresh deployment isn't reporting its own
-    built-in sources as "unknown" on first boot."""
+    permitted to auto-install on a source's behalf. If it doesn't exist yet
+    (first boot, or a fresh data volume), seeds it from the checked-in
+    package_allowlist.example.json template so editing that file before
+    first boot actually takes effect; falls back to the small hardcoded
+    DEFAULT_PACKAGE_ALLOWLIST (this project's own Dockerfile packages) if
+    the template is missing or unreadable, purely so a fresh deployment
+    isn't reporting its own built-in sources as "unknown" on first boot."""
     if not os.path.exists(PACKAGE_ALLOWLIST_FILE):
+        seed = DEFAULT_PACKAGE_ALLOWLIST
+        if os.path.exists(PACKAGE_ALLOWLIST_TEMPLATE):
+            try:
+                with open(PACKAGE_ALLOWLIST_TEMPLATE, 'r') as f:
+                    template_data = json.load(f)
+                if isinstance(template_data, list) and all(isinstance(p, str) for p in template_data):
+                    seed = template_data
+                else:
+                    print(f"⚠️ [Dependency Guard] {PACKAGE_ALLOWLIST_TEMPLATE} isn't a JSON list of strings, using the built-in default instead.")
+            except Exception as e:
+                print(f"⚠️ [Dependency Guard] Failed reading {PACKAGE_ALLOWLIST_TEMPLATE}, using the built-in default instead: {e}")
         try:
             os.makedirs(os.path.dirname(PACKAGE_ALLOWLIST_FILE), exist_ok=True)
             with open(PACKAGE_ALLOWLIST_FILE, 'w') as f:
-                json.dump(DEFAULT_PACKAGE_ALLOWLIST, f, indent=4)
+                json.dump(seed, f, indent=4)
             print(f"📁 [Dependency Guard] Seeded a new package allowlist at {PACKAGE_ALLOWLIST_FILE}.")
         except Exception as e:
-            print(f"⚠️ [Dependency Guard] Failed to seed package allowlist, using the in-memory default: {e}")
-            return set(DEFAULT_PACKAGE_ALLOWLIST)
+            print(f"⚠️ [Dependency Guard] Failed to seed package allowlist, using it in-memory only for this run: {e}")
+            return {pkg for pkg in seed if isinstance(pkg, str) and PACKAGE_NAME_PATTERN.match(pkg)}
 
     try:
         with open(PACKAGE_ALLOWLIST_FILE, 'r') as f:

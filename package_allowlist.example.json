@@ -1,0 +1,9 @@
+[
+    "ffmpeg",
+    "alsa-utils",
+    "usbutils",
+    "sox",
+    "libsox-fmt-all",
+    "rtl-sdr",
+    "librtlsdr-dev"
+]
