@@ -34,8 +34,33 @@ REQUIRED_PACKAGES = ["ffmpeg", "alsa-utils"]
 ASOUND_DIR = "/proc/asound"
 
 
+def _find_capture_pcm_index(card_dir):
+    """Returns this card's lowest-numbered capture-capable PCM device index,
+    or None if the card exposes no capture PCM at all. ALSA/usb-audio
+    doesn't guarantee capture lives at PCM device 0 -- some interfaces put
+    playback at device 0 and capture at device 1, or are playback-only.
+    /proc/asound/cardN/pcm<D>c is the kernel's own record of which device
+    numbers are capture-capable, so read that instead of assuming."""
+    try:
+        entries = os.listdir(card_dir)
+    except Exception:
+        return None
+
+    capture_indices = []
+    for entry in entries:
+        if entry.startswith("pcm") and entry.endswith("c") and os.path.isdir(os.path.join(card_dir, entry)):
+            try:
+                capture_indices.append(int(entry[len("pcm"):-1]))
+            except ValueError:
+                continue
+
+    return min(capture_indices) if capture_indices else None
+
+
 def discover():
-    """Scans /proc/asound for sound cards and reports one instance per card."""
+    """Scans /proc/asound for sound cards and reports one instance per card
+    that actually exposes a capture PCM (playback-only cards are skipped --
+    they can't be a "microphone" source)."""
     instances = []
     if not os.path.exists(ASOUND_DIR):
         return instances
@@ -50,7 +75,12 @@ def discover():
 
     for card in sorted(cards):
         card_index = card.replace("card", "")
-        device_string = f"plughw:{card_index},0"
+        card_dir = os.path.join(ASOUND_DIR, card)
+        pcm_index = _find_capture_pcm_index(card_dir)
+        if pcm_index is None:
+            continue  # no capture PCM on this card -- not a usable microphone
+
+        device_string = f"plughw:{card_index},{pcm_index}"
         channels = "2"
         label_template = DESCRIPTION
 
