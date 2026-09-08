@@ -20,6 +20,25 @@ import numpy as np
 import bot
 
 
+def _write_source(sources_dir, filename, code):
+    """Write a self-contained source plugin .py file into sources_dir for tests."""
+    path = Path(sources_dir) / filename
+    path.write_text(code)
+    return path
+
+
+SIMPLE_SOURCE_TEMPLATE = '''
+SOURCE_TYPE = {source_type!r}
+DESCRIPTION = {description!r}
+
+def discover():
+    return {instances!r}
+
+def build_command(instance, frequency, fifo_pipe):
+    return "true"
+'''
+
+
 # ======================================================================
 # parse_duration_to_seconds
 # ======================================================================
@@ -240,11 +259,11 @@ class TestResolveActiveSource:
 
     def test_type_not_found_and_no_sources_returns_test_signal_fallback(self):
         result = bot.resolve_active_source([], "sdr_dongle")
-        assert result["type"] == "test_signal"
+        assert result["type"] == bot.BUILTIN_FALLBACK_TYPE
 
     def test_empty_sources_returns_fallback(self):
         result = bot.resolve_active_source([], "usb_mic")
-        assert result["type"] == "test_signal"
+        assert result["type"] == bot.BUILTIN_FALLBACK_TYPE
         assert "description" in result
 
     def test_device_none_treated_as_no_device(self):
@@ -316,79 +335,101 @@ class TestClearStreamState:
 
 
 # ======================================================================
-# load_matrix_source_profiles / self_heal_test_signal_profile
+# load_source_modules
 # ======================================================================
 
-class TestLoadMatrixSourceProfiles:
-    def test_loads_valid_profiles(self, tmp_path):
+class TestLoadSourceModules:
+    def test_loads_valid_modules(self, tmp_path):
         sources_dir = str(tmp_path / "sources")
         os.makedirs(sources_dir, exist_ok=True)
 
-        # Create a profile
-        (tmp_path / "sources" / "usb_mic.json").write_text(json.dumps({
-            "type": "usb_mic",
-            "description": "USB Mic",
-        }))
-        (tmp_path / "sources" / "sdr_dongle.json").write_text(json.dumps({
-            "type": "sdr_dongle",
-            "description": "SDR Dongle",
-        }))
+        _write_source(sources_dir, "usb_mic.py", SIMPLE_SOURCE_TEMPLATE.format(
+            source_type="usb_mic", description="USB Mic", instances=[{"device": "plughw:0,0"}]
+        ))
+        _write_source(sources_dir, "sdr_dongle.py", SIMPLE_SOURCE_TEMPLATE.format(
+            source_type="sdr_dongle", description="SDR Dongle", instances=[]
+        ))
 
         with patch("bot.SOURCES_DIR", sources_dir):
-            profiles = bot.load_matrix_source_profiles()
+            modules = bot.load_source_modules()
 
-        assert "usb_mic" in profiles
-        assert "sdr_dongle" in profiles
-        assert profiles["usb_mic"]["description"] == "USB Mic"
+        assert "usb_mic" in modules
+        assert "sdr_dongle" in modules
+        assert modules["usb_mic"].DESCRIPTION == "USB Mic"
 
-    def test_self_heals_missing_test_signal(self, tmp_path):
+    def test_skips_files_missing_source_type(self, tmp_path):
         sources_dir = str(tmp_path / "sources")
         os.makedirs(sources_dir, exist_ok=True)
-        # No test_signal.json — should be created by self-heal
+        _write_source(sources_dir, "bad.py", "NOT_A_SOURCE_TYPE = 1\n")
 
         with patch("bot.SOURCES_DIR", sources_dir):
-            profiles = bot.load_matrix_source_profiles()
+            modules = bot.load_source_modules()
 
-        assert "test_signal" in profiles
-        assert profiles["test_signal"]["type"] == "test_signal"
+        assert modules == {}
 
-    def test_skips_files_without_type(self, tmp_path):
+    def test_skips_files_missing_required_functions(self, tmp_path):
         sources_dir = str(tmp_path / "sources")
         os.makedirs(sources_dir, exist_ok=True)
-        (tmp_path / "sources" / "bad.json").write_text(json.dumps({"not": "type"}))
+        _write_source(sources_dir, "incomplete.py", 'SOURCE_TYPE = "incomplete"\n')
 
         with patch("bot.SOURCES_DIR", sources_dir):
-            profiles = bot.load_matrix_source_profiles()
+            modules = bot.load_source_modules()
 
-        # test_signal gets added by self-heal; bad profile should be excluded
-        assert "test_signal" in profiles
-        assert "bad" not in profiles
+        assert modules == {}
 
-    def test_skips_invalid_json(self, tmp_path):
+    def test_skips_invalid_python_syntax(self, tmp_path):
         sources_dir = str(tmp_path / "sources")
         os.makedirs(sources_dir, exist_ok=True)
-        (tmp_path / "sources" / "invalid.json").write_text("not valid json {{{")
+        _write_source(sources_dir, "broken.py", "this is not valid python {{{\n")
 
         with patch("bot.SOURCES_DIR", sources_dir):
-            profiles = bot.load_matrix_source_profiles()
+            modules = bot.load_source_modules()
 
-        assert "test_signal" in profiles  # at least self-healed one
+        assert modules == {}
 
-    def test_sorted_by_filename(self, tmp_path):
+    def test_skips_files_that_raise_at_import_time(self, tmp_path):
         sources_dir = str(tmp_path / "sources")
         os.makedirs(sources_dir, exist_ok=True)
-        (tmp_path / "sources" / "z_profile.json").write_text(json.dumps({
-            "type": "z_type",
-        }))
-        (tmp_path / "sources" / "a_profile.json").write_text(json.dumps({
-            "type": "a_type",
-        }))
+        _write_source(sources_dir, "raises.py", "raise RuntimeError('boom at import')\n")
 
         with patch("bot.SOURCES_DIR", sources_dir):
-            profiles = bot.load_matrix_source_profiles()
+            modules = bot.load_source_modules()
 
-        assert "a_type" in profiles
-        assert "z_type" in profiles
+        assert modules == {}
+
+    def test_ignores_non_py_and_underscore_files(self, tmp_path):
+        sources_dir = str(tmp_path / "sources")
+        os.makedirs(sources_dir, exist_ok=True)
+        (Path(sources_dir) / "notes.txt").write_text("not python")
+        _write_source(sources_dir, "_helper.py", SIMPLE_SOURCE_TEMPLATE.format(
+            source_type="helper", description="Helper", instances=[]
+        ))
+
+        with patch("bot.SOURCES_DIR", sources_dir):
+            modules = bot.load_source_modules()
+
+        assert modules == {}
+
+    def test_missing_sources_dir_returns_empty(self, tmp_path):
+        missing_dir = str(tmp_path / "does_not_exist")
+        with patch("bot.SOURCES_DIR", missing_dir):
+            modules = bot.load_source_modules()
+        assert modules == {}
+
+    def test_duplicate_source_type_keeps_first_by_filename(self, tmp_path):
+        sources_dir = str(tmp_path / "sources")
+        os.makedirs(sources_dir, exist_ok=True)
+        _write_source(sources_dir, "a_first.py", SIMPLE_SOURCE_TEMPLATE.format(
+            source_type="dup", description="first", instances=[]
+        ))
+        _write_source(sources_dir, "z_second.py", SIMPLE_SOURCE_TEMPLATE.format(
+            source_type="dup", description="second", instances=[]
+        ))
+
+        with patch("bot.SOURCES_DIR", sources_dir):
+            modules = bot.load_source_modules()
+
+        assert modules["dup"].DESCRIPTION == "first"
 
 
 # ======================================================================
@@ -396,17 +437,58 @@ class TestLoadMatrixSourceProfiles:
 # ======================================================================
 
 class TestDiscoverHardwareProfile:
-    def test_always_includes_test_signal_at_index_0(self, tmp_path):
-        # Ensure no profiles exist to avoid interference; we only care about the
-        # test_signal entry at index 0.
+    def test_empty_sources_dir_returns_builtin_fallback(self, tmp_path):
         sources_dir = str(tmp_path / "sources")
         os.makedirs(sources_dir, exist_ok=True)
 
         with patch("bot.SOURCES_DIR", sources_dir):
             sources = bot.discover_hardware_profile()
 
-        assert sources[0]["type"] == "test_signal"
-        assert sources[0]["device"] == "virtual"
+        assert len(sources) == 1
+        assert sources[0]["type"] == bot.BUILTIN_FALLBACK_TYPE
+        assert sources[0]["device"] == "builtin"
+
+    def test_aggregates_instances_from_multiple_modules(self, tmp_path):
+        sources_dir = str(tmp_path / "sources")
+        os.makedirs(sources_dir, exist_ok=True)
+        _write_source(sources_dir, "a.py", SIMPLE_SOURCE_TEMPLATE.format(
+            source_type="a", description="A", instances=[{"device": "dev-a"}]
+        ))
+        _write_source(sources_dir, "b.py", SIMPLE_SOURCE_TEMPLATE.format(
+            source_type="b", description="B", instances=[{"device": "dev-b1"}, {"device": "dev-b2"}]
+        ))
+
+        with patch("bot.SOURCES_DIR", sources_dir):
+            sources = bot.discover_hardware_profile()
+
+        types = [s["type"] for s in sources]
+        assert types.count("a") == 1
+        assert types.count("b") == 2
+        # Every entry gets its type injected and default channels/description filled in
+        for s in sources:
+            assert "type" in s
+            assert "channels" in s
+            assert "description" in s
+
+    def test_module_raising_in_discover_is_skipped(self, tmp_path):
+        sources_dir = str(tmp_path / "sources")
+        os.makedirs(sources_dir, exist_ok=True)
+        _write_source(sources_dir, "broken.py", '''
+SOURCE_TYPE = "broken"
+DESCRIPTION = "Broken"
+
+def discover():
+    raise RuntimeError("hardware missing")
+
+def build_command(instance, frequency, fifo_pipe):
+    return "true"
+''')
+
+        with patch("bot.SOURCES_DIR", sources_dir):
+            sources = bot.discover_hardware_profile()
+
+        # Falls back to the builtin tone since the only source raised.
+        assert sources[0]["type"] == bot.BUILTIN_FALLBACK_TYPE
 
     def test_caches_to_sources_cache_file(self, tmp_path):
         cache_file = str(tmp_path / "sources_cache.json")
@@ -421,69 +503,22 @@ class TestDiscoverHardwareProfile:
         data = json.loads(open(cache_file).read())
         assert isinstance(data, list)
 
+    def test_cache_write_failure_does_not_raise(self, tmp_path, capsys):
+        """Use a file-as-directory trick so this reliably fails on any OS/user,
+        including root (where a literal "/nonexistent-dir-xyz" would actually
+        get created successfully)."""
+        sources_dir = str(tmp_path / "sources")
+        os.makedirs(sources_dir, exist_ok=True)
+        blocker = tmp_path / "blocker"
+        blocker.write_text("i am a file, not a directory")
+        bad_cache_file = str(blocker / "sub" / "cache.json")
 
-# ======================================================================
-# probe_device_has_signal
-# ======================================================================
+        with patch("bot.SOURCES_DIR", sources_dir), \
+             patch("bot.SOURCES_CACHE_FILE", bad_cache_file):
+            sources = bot.discover_hardware_profile()
 
-class TestProbeDeviceHasSignal:
-    def test_non_plughw_returns_error(self):
-        status, detail = bot.probe_device_has_signal("something_else")
-        assert status == "error"
-
-    def test_empty_device_returns_error(self):
-        status, _ = bot.probe_device_has_signal("")
-        assert status == "error"
-
-    def test_no_arecord_returns_error(self):
-        with patch("shutil.which", return_value=None):
-            status, detail = bot.probe_device_has_signal("plughw:0,0")
-        assert status == "error"
-
-    def test_nonzero_returncode_returns_error(self):
-        proc = MagicMock(returncode=1, stderr=b"Device or resource busy\n")
-        with patch("shutil.which", return_value="/usr/bin/arecord"), \
-             patch("subprocess.run", return_value=proc):
-            status, detail = bot.probe_device_has_signal("plughw:0,0")
-        assert status == "error"
-
-    def test_timeout_returns_error(self):
-        with patch("shutil.which", return_value="/usr/bin/arecord"), \
-             patch("subprocess.run", side_effect=subprocess.TimeoutExpired("arecord", 2.3)):
-            status, _ = bot.probe_device_has_signal("plughw:0,0")
-        assert status == "error"
-
-    def test_exception_returns_error(self):
-        with patch("shutil.which", return_value="/usr/bin/arecord"), \
-             patch("subprocess.run", side_effect=OSError("Permission denied")):
-            status, detail = bot.probe_device_has_signal("plughw:0,0")
-        assert status == "error"
-
-    def test_empty_output_returns_error(self):
-        proc = MagicMock(returncode=0, stdout=b"")
-        with patch("shutil.which", return_value="/usr/bin/arecord"), \
-             patch("subprocess.run", return_value=proc):
-            status, _ = bot.probe_device_has_signal("plughw:0,0")
-        assert status == "error"
-
-    def test_silent_below_threshold(self):
-        """All samples are zero → rms=0 → silent."""
-        raw = b"\x00" * 160  # 80 samples of zero
-        proc = MagicMock(returncode=0, stdout=raw)
-        with patch("shutil.which", return_value="/usr/bin/arecord"), \
-             patch("subprocess.run", return_value=proc):
-            status, detail = bot.probe_device_has_signal("plughw:0,0")
-        assert status == "silent"
-
-    def test_above_threshold(self):
-        """Large-amplitude samples produce rms above the default 50.0 threshold."""
-        # 80 samples at +32000 (well above the 50.0 rms threshold)
-        raw = array.array('h', [32000] * 80).tobytes()
-        proc = MagicMock(returncode=0, stdout=raw)
-        with patch("shutil.which", return_value="/usr/bin/arecord"), \
-             patch("subprocess.run", return_value=proc):
-            status, detail = bot.probe_device_has_signal("plughw:0,0")
-        assert status == "signal"
+        assert sources[0]["type"] == bot.BUILTIN_FALLBACK_TYPE
+        assert "Failed writing" in capsys.readouterr().out
 
 
 # ======================================================================
@@ -491,28 +526,38 @@ class TestProbeDeviceHasSignal:
 # ======================================================================
 
 class TestScanSourcesForSignal:
-    def test_only_probes_plughw(self):
+    def test_only_probes_sources_whose_module_defines_probe_signal(self):
         sources = [
-            {"device": "virtual"},
-            {"device": "plughw:0,0"},
-            {"device": "rtlsdr"},
-            {"device": "plughw:1,0"},
+            {"type": "no_probe", "device": "virtual"},
+            {"type": "probeable", "device": "plughw:0,0"},
         ]
 
-        probe_result = {}
+        no_probe_module = MagicMock(spec=[])  # no probe_signal attribute at all
+        probeable_module = MagicMock()
+        probeable_module.probe_signal.return_value = ("signal", "rms=100.0")
 
-        def fake_probe(device):
-            probe_result[device] = ("signal", "rms=100.0")
-            return ("signal", "rms=100.0")
+        modules = {"no_probe": no_probe_module, "probeable": probeable_module}
 
-        with patch.object(bot, "probe_device_has_signal", side_effect=fake_probe):
-            result = bot.scan_sources_for_signal(sources)
+        result = bot.scan_sources_for_signal(sources, modules)
 
-        # Only plughw devices should have been probed
         assert "plughw:0,0" in result
-        assert "plughw:1,0" in result
+        assert result["plughw:0,0"] == ("signal", "rms=100.0")
         assert "virtual" not in result
-        assert "rtlsdr" not in result
+
+    def test_unknown_source_type_is_skipped(self):
+        sources = [{"type": "missing_module", "device": "dev"}]
+        result = bot.scan_sources_for_signal(sources, modules={})
+        assert result == {}
+
+    def test_probe_signal_raising_is_caught_as_error(self):
+        sources = [{"type": "flaky", "device": "dev"}]
+        flaky_module = MagicMock()
+        flaky_module.probe_signal.side_effect = RuntimeError("boom")
+
+        result = bot.scan_sources_for_signal(sources, {"flaky": flaky_module})
+
+        assert result["dev"][0] == "error"
+        assert "boom" in result["dev"][1]
 
 
 # ======================================================================
@@ -863,37 +908,11 @@ class TestScanRangeEdgeCases:
 
 
 # ======================================================================
-# probe_device_has_signal — stderr parsing edge cases
+# Note: ALSA-specific signal probing (formerly probe_device_has_signal)
+# now lives in sources/alsa.py's probe_signal() and is covered by
+# tests/test_sources_alsa.py instead of here -- bot.py no longer contains
+# any ALSA-specific code to test.
 # ======================================================================
-
-class TestProbeDeviceHasSignalEdgeCases:
-    def test_stderr_multiple_lines(self):
-        """Should return the last line of stderr on failure."""
-        proc = MagicMock(returncode=1, stderr=b"line1\nline2\nlast error here")
-        with patch("shutil.which", return_value="/usr/bin/arecord"), \
-             patch("subprocess.run", return_value=proc):
-            status, detail = bot.probe_device_has_signal("plughw:0,0")
-        assert status == "error"
-        assert "last error here" in detail
-
-    def test_stderr_no_lines(self):
-        """Empty stderr should fall back to exit code message."""
-        proc = MagicMock(returncode=1, stderr=b"")
-        with patch("shutil.which", return_value="/usr/bin/arecord"), \
-             patch("subprocess.run", return_value=proc):
-            status, detail = bot.probe_device_has_signal("plughw:0,0")
-        assert status == "error"
-        assert "exit code 1" in detail
-
-    def test_odd_number_of_bytes_strips_last(self):
-        """If byte count is odd, strips last byte to keep pairs."""
-        raw = b"\xff\xfe\xff"  # 3 bytes → samples only use first 2 (1 sample)
-        proc = MagicMock(returncode=0, stdout=raw)
-
-        with patch("shutil.which", return_value="/usr/bin/arecord"), \
-             patch("subprocess.run", return_value=proc):
-            status, detail = bot.probe_device_has_signal("plughw:0,0")
-        assert isinstance(status, str)
 
 
 # ======================================================================
@@ -944,38 +963,22 @@ class TestResolveActiveSourceEdgeCases:
 
 
 # ======================================================================
-# Test the self_heal_test_signal_profile directly
+# Note: the old JSON self-healing (self_heal_test_signal_profile) is gone
+# entirely -- test_signal is now just a normal, removable source plugin
+# (see tests/test_sources_test_signal.py), and the one hardcoded fallback
+# bot.py still owns (BUILTIN_FALLBACK_SOURCE / _builtin_fallback_command)
+# is covered by TestBuiltinFallback below.
 # ======================================================================
 
-class TestSelfHealTestSignalProfile:
-    def test_creates_file_when_missing(self, tmp_path):
-        target = str(tmp_path / "profiles" / "test_signal.json")
-        sources_dir = str(tmp_path / "profiles")
-        os.makedirs(sources_dir, exist_ok=True)
+class TestBuiltinFallback:
+    def test_fallback_source_shape(self):
+        assert bot.BUILTIN_FALLBACK_SOURCE["type"] == bot.BUILTIN_FALLBACK_TYPE
+        assert "description" in bot.BUILTIN_FALLBACK_SOURCE
 
-        with patch("bot.SOURCES_DIR", sources_dir):
-            bot.self_heal_test_signal_profile()
-
-        assert os.path.exists(target)
-        data = json.loads(open(target).read())
-        assert data["type"] == "test_signal"
-        assert "pipeline_template" in data
-
-    def test_skips_when_exists(self, tmp_path):
-        target = str(tmp_path / "profiles" / "test_signal.json")
-        sources_dir = str(tmp_path / "profiles")
-        os.makedirs(sources_dir, exist_ok=True)
-        with open(target, 'w') as f:
-            json.dump({"type": "test_signal", "description": "custom"}, f)
-
-        original_mtime = os.path.getmtime(target)
-        import time
-        time.sleep(0.1)  # ensure any write would change mtime
-
-        with patch("bot.SOURCES_DIR", sources_dir):
-            bot.self_heal_test_signal_profile()
-
-        assert os.path.getmtime(target) == original_mtime
+    def test_fallback_command_writes_into_given_fifo(self):
+        cmd = bot._builtin_fallback_command("/tmp/some_pipe")
+        assert "/tmp/some_pipe" in cmd
+        assert "ffmpeg" in cmd
 
 
 # ======================================================================
