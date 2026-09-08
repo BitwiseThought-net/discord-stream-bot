@@ -816,19 +816,29 @@ class TestAutoInputCommand:
 # ======================================================================
 
 class TestTuneChannelCommand:
-    def test_scan_delegates_to_execute_channel_scan(self):
+    def test_scan_keyword_delegates_to_handle_channel_scan_request(self):
+        """tune_channel only does a lightweight 'does this look like a scan
+        request' regex check itself -- the real parsing/validation (which
+        needs the active source's own MHz policy) happens inside
+        handle_channel_scan_request. See TestHandleChannelScanRequest in
+        test_bot.py for that logic in full."""
         interaction = make_interaction()
-        with patch.object(bot, "execute_channel_scan", new=AsyncMock()) as mock_scan:
+        with patch.object(bot, "handle_channel_scan_request", new=AsyncMock()) as mock_handle:
             run(bot.tune_channel.callback(interaction, "scan 88-108"))
-        mock_scan.assert_called_once()
-        args = mock_scan.call_args[0]
-        assert args[1] == (88_000_000, 108_000_000)
+        mock_handle.assert_called_once_with(interaction, "scan 88-108")
 
-    def test_invalid_scan_range_sends_warning(self):
+    def test_bare_scan_keyword_also_delegates(self):
         interaction = make_interaction()
-        run(bot.tune_channel.callback(interaction, "scan 200-20"))
-        interaction.response.send_message.assert_called_once()
-        assert "greater than" in str(interaction.response.send_message.call_args)
+        with patch.object(bot, "handle_channel_scan_request", new=AsyncMock()) as mock_handle:
+            run(bot.tune_channel.callback(interaction, "SCAN"))
+        mock_handle.assert_called_once()
+
+    def test_non_scan_frequency_does_not_delegate(self):
+        interaction = make_interaction(voice_client=None)
+        with patch.object(bot, "handle_channel_scan_request", new=AsyncMock()) as mock_handle, \
+             patch.object(bot, "save_stream_state"):
+            run(bot.tune_channel.callback(interaction, "94.9M"))
+        mock_handle.assert_not_called()
 
     def test_invalid_frequency_format(self):
         interaction = make_interaction()
@@ -1080,149 +1090,46 @@ class TestWakeTimerWorker:
 # find_peaks_in_step — DC-guard exclusion and multi-peak grouping
 # ======================================================================
 
-class TestFindPeaksInStepDcGuard:
-    def _make_tone(self, freq_offset_hz, sample_rate, n, amplitude=50.0):
-        t = np.arange(n) / sample_rate
-        return amplitude * np.exp(2j * np.pi * freq_offset_hz * t)
-
-    def test_dc_spike_excluded_from_results(self):
-        sample_rate = bot.SCAN_SAMPLE_RATE_HZ
-        n = bot.SCAN_FFT_SIZE
-        center_hz = 100_000_000
-        rng = np.random.default_rng(7)
-        noise = rng.standard_normal(n).astype(np.complex128) * 0.001
-        # A DC-only component (zero frequency offset) whose leakage stays
-        # within the guard band -- lands right on the center bin, which the
-        # DC guard should exclude entirely.
-        dc_spike = np.full(n, 1.0, dtype=np.complex128)
-        samples = noise + dc_spike
-
-        peaks = bot.find_peaks_in_step(center_hz, sample_rate, samples)
-
-        # The DC artifact must never be reported as a channel.
-        assert peaks == []
-
-    def test_off_center_tone_detected_and_dc_excluded(self):
-        sample_rate = bot.SCAN_SAMPLE_RATE_HZ
-        n = bot.SCAN_FFT_SIZE
-        center_hz = 100_000_000
-        rng = np.random.default_rng(11)
-        noise = rng.standard_normal(n).astype(np.complex128) * 0.001
-
-        # A real off-center tone, well clear of the DC guard band.
-        real_tone = self._make_tone(300_000, sample_rate, n, amplitude=80.0)
-        # Plus a small DC artifact whose leakage stays within the guard band.
-        dc_spike = np.full(n, 1.0, dtype=np.complex128)
-
-        samples = noise + real_tone + dc_spike
-        peaks = bot.find_peaks_in_step(center_hz, sample_rate, samples)
-
-        assert len(peaks) >= 1
-        # At least one detected peak should be near center + 300kHz, and
-        # the DC artifact itself should not show up as its own peak.
-        bin_width = sample_rate / n
-        found_offset_peak = any(
-            abs(freq_hz - (center_hz + 300_000)) < 5 * bin_width for freq_hz, _ in peaks
-        )
-        assert found_offset_peak
-        assert not any(freq_hz == center_hz for freq_hz, _ in peaks)
-
-    def test_two_separated_peaks_both_returned(self):
-        sample_rate = bot.SCAN_SAMPLE_RATE_HZ
-        n = bot.SCAN_FFT_SIZE
-        center_hz = 100_000_000
-        rng = np.random.default_rng(3)
-        noise = rng.standard_normal(n).astype(np.complex128) * 0.001
-
-        tone_a = self._make_tone(300_000, sample_rate, n, amplitude=80.0)
-        tone_b = self._make_tone(-400_000, sample_rate, n, amplitude=80.0)
-        samples = noise + tone_a + tone_b
-
-        peaks = bot.find_peaks_in_step(center_hz, sample_rate, samples)
-        assert len(peaks) >= 2
-
-    def test_entirely_below_threshold_returns_empty(self):
-        sample_rate = bot.SCAN_SAMPLE_RATE_HZ
-        n = bot.SCAN_FFT_SIZE
-        samples = np.zeros(n, dtype=np.complex128)
-        peaks = bot.find_peaks_in_step(100_000_000, sample_rate, samples)
-        assert peaks == []
+# ======================================================================
+# Note: find_peaks_in_step's DC-guard behavior now lives entirely in
+# actions/scan_range.py (bot.py has no FFT code of its own anymore) --
+# see TestFindPeaksInStep in tests/test_actions_scan_range.py.
+# ======================================================================
 
 
 # ======================================================================
-# execute_channel_scan — full success/failure flows
+# execute_channel_scan — full success/failure flows via the source-agnostic
+# dispatch path (a plain MagicMock stands in for whatever scan_fn the
+# active source module would actually provide -- execute_channel_scan
+# doesn't know or care what's behind it).
 # ======================================================================
 
 class TestExecuteChannelScanFullFlow:
-    def test_pauses_active_pipeline_before_scanning(self):
-        interaction = make_interaction()
-        bot.bot.hardware_process = MagicMock()
-        try:
-            with patch("bot.shutil.which", return_value="/usr/bin/rtl_sdr"), \
-                 patch.object(bot, "NUMPY_AVAILABLE", True), \
-                 patch.object(bot, "stop_active_hardware_process") as mock_stop, \
-                 patch.object(bot, "scan_for_clear_channels_sync", return_value=[]):
-                run(bot.execute_channel_scan(interaction, (94_000_000, 95_000_000)))
-        finally:
-            bot.bot.hardware_process = None
-
-        mock_stop.assert_called_once()
-        interaction.response.defer.assert_called_once()
-        all_calls = " ".join(str(c) for c in interaction.followup.send.call_args_list)
-        assert "Pausing the active pipeline" in all_calls
-        assert "pipeline that was running before this scan is now stopped" in all_calls
-
-    def test_no_channels_found_message(self):
-        interaction = make_interaction()
-        bot.bot.hardware_process = None
-        with patch("bot.shutil.which", return_value="/usr/bin/rtl_sdr"), \
-             patch.object(bot, "NUMPY_AVAILABLE", True), \
-             patch.object(bot, "scan_for_clear_channels_sync", return_value=[]):
-            run(bot.execute_channel_scan(interaction, (94_000_000, 95_000_000)))
-
-        all_calls = " ".join(str(c) for c in interaction.followup.send.call_args_list)
-        assert "No channels above the noise floor" in all_calls
-
-    def test_channels_found_lists_catalog(self):
-        interaction = make_interaction()
-        bot.bot.hardware_process = None
-        catalog = [{"frequency": "94.5M", "power_db": -12.3}]
-        with patch("bot.shutil.which", return_value="/usr/bin/rtl_sdr"), \
-             patch.object(bot, "NUMPY_AVAILABLE", True), \
-             patch.object(bot, "scan_for_clear_channels_sync", return_value=catalog):
-            run(bot.execute_channel_scan(interaction, (94_000_000, 95_000_000)))
-
-        all_calls = " ".join(str(c) for c in interaction.followup.send.call_args_list)
-        assert "Clear Channels Found" in all_calls
-        assert "94.5M" in all_calls
-        assert "-12.3" in all_calls
-        assert "/radio channel <frequency>" in all_calls
-
-    def test_scan_exception_reports_failure(self):
-        interaction = make_interaction()
-        bot.bot.hardware_process = None
-        with patch("bot.shutil.which", return_value="/usr/bin/rtl_sdr"), \
-             patch.object(bot, "NUMPY_AVAILABLE", True), \
-             patch.object(bot, "scan_for_clear_channels_sync", side_effect=RuntimeError("dongle unplugged")):
-            run(bot.execute_channel_scan(interaction, (94_000_000, 95_000_000)))
-
-        all_calls = " ".join(str(c) for c in interaction.followup.send.call_args_list)
-        assert "Scan failed" in all_calls
-        assert "dongle unplugged" in all_calls
-
     def test_long_response_chunked_across_multiple_sends(self):
         interaction = make_interaction()
         bot.bot.hardware_process = None
         # Build a large catalog so the response exceeds 1900 chars and must
         # be split across multiple followup.send calls.
         catalog = [{"frequency": f"{88 + i * 0.1:.1f}M", "power_db": -10.0} for i in range(150)]
-        with patch("bot.shutil.which", return_value="/usr/bin/rtl_sdr"), \
-             patch.object(bot, "NUMPY_AVAILABLE", True), \
-             patch.object(bot, "scan_for_clear_channels_sync", return_value=catalog):
-            run(bot.execute_channel_scan(interaction, (88_000_000, 108_000_000)))
+        scan_fn = MagicMock(return_value=catalog)
+        run(bot.execute_channel_scan(interaction, (88_000_000, 108_000_000), scan_fn, active_description="Radio"))
 
         # More than the 2 "status" sends (scanning.../catalog) -- chunked
         assert interaction.followup.send.call_count > 2
+
+    def test_scan_fn_called_with_hz_bounds(self):
+        interaction = make_interaction()
+        bot.bot.hardware_process = None
+        scan_fn = MagicMock(return_value=[])
+        run(bot.execute_channel_scan(interaction, (94_000_000, 95_000_000), scan_fn, active_description="Radio"))
+        scan_fn.assert_called_once_with(94_000_000, 95_000_000)
+
+    def test_defers_response_before_sending_followups(self):
+        interaction = make_interaction()
+        bot.bot.hardware_process = None
+        scan_fn = MagicMock(return_value=[])
+        run(bot.execute_channel_scan(interaction, (94_000_000, 95_000_000), scan_fn, active_description="Radio"))
+        interaction.response.defer.assert_called_once()
 
 
 # ======================================================================
