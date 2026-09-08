@@ -57,267 +57,15 @@ def make_interaction(guild_id=1, voice_client=None, user_voice_channel="__unset_
 # discover_hardware_profile — ALSA + SDR probe branches
 # ======================================================================
 
-class TestDiscoverHardwareProfileAlsaBranch:
-    def test_alsa_cards_discovered_stereo(self, tmp_path):
-        sources_dir = str(tmp_path / "sources")
-        os.makedirs(sources_dir, exist_ok=True)
-        (tmp_path / "sources" / "usb_mic.json").write_text(json.dumps({
-            "type": "usb_mic",
-            "description": "USB Microphone ({device})",
-            "discovery_trigger": "alsa_sound_card",
-        }))
-
-        proc_asound = tmp_path / "proc_asound"
-        card0 = proc_asound / "card0"
-        card0.mkdir(parents=True)
-        (card0 / "stream0").write_text("2 channels available")
-
-        real_exists = os.path.exists
-        real_listdir = os.listdir
-        real_isdir = os.path.isdir
-        real_open = open
-
-        def fake_exists(path):
-            if path == "/proc/asound":
-                return True
-            return real_exists(path)
-
-        def fake_listdir(path):
-            if path == "/proc/asound":
-                return ["card0"]
-            return real_listdir(path)
-
-        def fake_isdir(path):
-            if path == os.path.join("/proc/asound", "card0"):
-                return True
-            return real_isdir(path)
-
-        def fake_open(path, *args, **kwargs):
-            if path == os.path.join("/proc/asound", "card0", "usbstream"):
-                raise FileNotFoundError()
-            if path == os.path.join("/proc/asound", "card0", "stream0"):
-                return real_open(card0 / "stream0", *args, **kwargs)
-            return real_open(path, *args, **kwargs)
-
-        with patch("bot.SOURCES_DIR", sources_dir), \
-             patch("bot.SOURCES_CACHE_FILE", str(tmp_path / "cache.json")), \
-             patch("bot.os.path.exists", side_effect=fake_exists), \
-             patch("bot.os.listdir", side_effect=fake_listdir), \
-             patch("bot.os.path.isdir", side_effect=fake_isdir), \
-             patch("builtins.open", side_effect=fake_open), \
-             patch("bot.subprocess.run", return_value=MagicMock(stdout="")):
-            sources = bot.discover_hardware_profile()
-
-        usb_entries = [s for s in sources if s["type"] == "usb_mic"]
-        assert len(usb_entries) == 1
-        assert usb_entries[0]["device"] == "plughw:0,0"
-        assert usb_entries[0]["channels"] == "2"
-
-    def test_alsa_cards_mono_via_usbstream(self, tmp_path):
-        sources_dir = str(tmp_path / "sources")
-        os.makedirs(sources_dir, exist_ok=True)
-        (tmp_path / "sources" / "usb_mic.json").write_text(json.dumps({
-            "type": "usb_mic",
-            "description": "USB Mic ({device})",
-            "mono_description": "USB Mono Mic ({device})",
-            "discovery_trigger": "alsa_sound_card",
-        }))
-
-        card3 = tmp_path / "proc_asound" / "card3"
-        card3.mkdir(parents=True)
-        (card3 / "usbstream").write_text("1 channel found")
-        real_open = open
-        real_exists = os.path.exists
-        real_listdir = os.listdir
-        real_isdir = os.path.isdir
-
-        def fake_exists(path):
-            if path == "/proc/asound":
-                return True
-            if path == os.path.join("/proc/asound", "card3", "usbstream"):
-                return True
-            if path == os.path.join("/proc/asound", "card3", "stream0"):
-                return False
-            return real_exists(path)
-
-        def fake_listdir(path):
-            if path == "/proc/asound":
-                return ["card3"]
-            return real_listdir(path)
-
-        def fake_isdir(path):
-            if path == os.path.join("/proc/asound", "card3"):
-                return True
-            return real_isdir(path)
-
-        def fake_open(path, *args, **kwargs):
-            if path == os.path.join("/proc/asound", "card3", "usbstream"):
-                return real_open(card3 / "usbstream", *args, **kwargs)
-            return real_open(path, *args, **kwargs)
-
-        with patch("bot.SOURCES_DIR", sources_dir), \
-             patch("bot.SOURCES_CACHE_FILE", str(tmp_path / "cache.json")), \
-             patch("bot.os.path.exists", side_effect=fake_exists), \
-             patch("bot.os.listdir", side_effect=fake_listdir), \
-             patch("bot.os.path.isdir", side_effect=fake_isdir), \
-             patch("builtins.open", side_effect=fake_open), \
-             patch("bot.subprocess.run", return_value=MagicMock(stdout="")):
-            sources = bot.discover_hardware_profile()
-
-        usb_entries = [s for s in sources if s["type"] == "usb_mic"]
-        assert len(usb_entries) == 1
-        assert usb_entries[0]["channels"] == "1"
-        assert usb_entries[0]["device"] == "plughw:3,0"
-
-    def test_alsa_scan_exception_is_caught(self, tmp_path):
-        """A raised exception while scanning /proc/asound shouldn't blow up
-        discovery -- it should just skip that profile."""
-        sources_dir = str(tmp_path / "sources")
-        os.makedirs(sources_dir, exist_ok=True)
-        (tmp_path / "sources" / "usb_mic.json").write_text(json.dumps({
-            "type": "usb_mic",
-            "description": "USB Mic",
-            "discovery_trigger": "alsa_sound_card",
-        }))
-
-        real_exists = os.path.exists
-        real_listdir = os.listdir
-
-        def fake_exists(path):
-            if path == "/proc/asound":
-                return True
-            return real_exists(path)
-
-        def fake_listdir(path):
-            if path == "/proc/asound":
-                raise OSError("permission denied")
-            return real_listdir(path)
-
-        with patch("bot.SOURCES_DIR", sources_dir), \
-             patch("bot.SOURCES_CACHE_FILE", str(tmp_path / "cache.json")), \
-             patch("bot.os.path.exists", side_effect=fake_exists), \
-             patch("bot.os.listdir", side_effect=fake_listdir), \
-             patch("bot.subprocess.run", return_value=MagicMock(stdout="")):
-            sources = bot.discover_hardware_profile()
-
-        # Should still return at least the test_signal entry, no crash.
-        assert sources[0]["type"] == "test_signal"
-
-    def test_no_proc_asound_skips_alsa(self, tmp_path):
-        sources_dir = str(tmp_path / "sources")
-        os.makedirs(sources_dir, exist_ok=True)
-        (tmp_path / "sources" / "usb_mic.json").write_text(json.dumps({
-            "type": "usb_mic",
-            "description": "USB Mic",
-            "discovery_trigger": "alsa_sound_card",
-        }))
-
-        with patch("bot.SOURCES_DIR", sources_dir), \
-             patch("bot.SOURCES_CACHE_FILE", str(tmp_path / "cache.json")), \
-             patch("bot.subprocess.run", return_value=MagicMock(stdout="")):
-            sources = bot.discover_hardware_profile()
-
-        assert all(s["type"] != "usb_mic" for s in sources)
-
-
-class TestDiscoverHardwareProfileSdrBranch:
-    def test_sdr_chipset_match_from_lsusb(self, tmp_path):
-        sources_dir = str(tmp_path / "sources")
-        os.makedirs(sources_dir, exist_ok=True)
-        (tmp_path / "sources" / "sdr_radio.json").write_text(json.dumps({
-            "type": "sdr_radio",
-            "description": "SDR Radio Capture",
-            "discovery_trigger": "usb_chipset_0bda:2838",
-        }))
-
-        fake_lsusb = MagicMock(stdout="Bus 001 Device 004: ID 0bda:2838 Realtek Semiconductor Corp.")
-        with patch("bot.SOURCES_DIR", sources_dir), \
-             patch("bot.SOURCES_CACHE_FILE", str(tmp_path / "cache.json")), \
-             patch("bot.subprocess.run", return_value=fake_lsusb):
-            sources = bot.discover_hardware_profile()
-
-        sdr_entries = [s for s in sources if s["type"] == "sdr_radio"]
-        assert len(sdr_entries) == 1
-        assert sdr_entries[0]["device"] == "rtlsdr"
-
-    def test_sdr_chipset_match_via_rtl2832_fallback(self, tmp_path):
-        sources_dir = str(tmp_path / "sources")
-        os.makedirs(sources_dir, exist_ok=True)
-        (tmp_path / "sources" / "sdr_radio.json").write_text(json.dumps({
-            "type": "sdr_radio",
-            "description": "SDR Radio Capture",
-            "discovery_trigger": "usb_chipset_ffff:ffff",
-        }))
-
-        fake_lsusb = MagicMock(stdout="Bus 001 Device 004: ID 0bda:2838 RTL2832U DVB-T")
-        with patch("bot.SOURCES_DIR", sources_dir), \
-             patch("bot.SOURCES_CACHE_FILE", str(tmp_path / "cache.json")), \
-             patch("bot.subprocess.run", return_value=fake_lsusb):
-            sources = bot.discover_hardware_profile()
-
-        sdr_entries = [s for s in sources if s["type"] == "sdr_radio"]
-        assert len(sdr_entries) == 1
-
-    def test_sdr_no_match_not_added(self, tmp_path):
-        sources_dir = str(tmp_path / "sources")
-        os.makedirs(sources_dir, exist_ok=True)
-        (tmp_path / "sources" / "sdr_radio.json").write_text(json.dumps({
-            "type": "sdr_radio",
-            "description": "SDR Radio Capture",
-            "discovery_trigger": "usb_chipset_dead:beef",
-        }))
-
-        fake_lsusb = MagicMock(stdout="Bus 001 Device 004: ID 0123:4567 Some Other Device")
-        with patch("bot.SOURCES_DIR", sources_dir), \
-             patch("bot.SOURCES_CACHE_FILE", str(tmp_path / "cache.json")), \
-             patch("bot.subprocess.run", return_value=fake_lsusb):
-            sources = bot.discover_hardware_profile()
-
-        assert all(s["type"] != "sdr_radio" for s in sources)
-
-    def test_lsusb_missing_handled_gracefully(self, tmp_path):
-        sources_dir = str(tmp_path / "sources")
-        os.makedirs(sources_dir, exist_ok=True)
-        (tmp_path / "sources" / "sdr_radio.json").write_text(json.dumps({
-            "type": "sdr_radio",
-            "discovery_trigger": "usb_chipset_0bda:2838",
-        }))
-
-        with patch("bot.SOURCES_DIR", sources_dir), \
-             patch("bot.SOURCES_CACHE_FILE", str(tmp_path / "cache.json")), \
-             patch("bot.subprocess.run", side_effect=FileNotFoundError("lsusb not found")):
-            sources = bot.discover_hardware_profile()
-
-        # Shouldn't blow up; sdr just won't be discovered.
-        assert all(s["type"] != "sdr_radio" for s in sources)
-
-    def test_cache_write_failure_is_caught(self, tmp_path):
-        """If SOURCES_CACHE_FILE can't be written, discovery still returns."""
-        sources_dir = str(tmp_path / "sources")
-        os.makedirs(sources_dir, exist_ok=True)
-        with patch("bot.SOURCES_DIR", sources_dir), \
-             patch("bot.SOURCES_CACHE_FILE", "/nonexistent-dir-xyz/cache.json"), \
-             patch("bot.subprocess.run", return_value=MagicMock(stdout="")):
-            sources = bot.discover_hardware_profile()
-        assert sources[0]["type"] == "test_signal"
-
-    def test_cache_write_failure_prints_warning(self, tmp_path, capsys):
-        """A genuinely unwritable cache path (parent is a file, not a dir)
-        should hit the except branch and print a warning, not raise."""
-        sources_dir = str(tmp_path / "sources")
-        os.makedirs(sources_dir, exist_ok=True)
-        blocker = tmp_path / "blocker"
-        blocker.write_text("i am a file, not a directory")
-        bad_cache_file = str(blocker / "sub" / "cache.json")
-
-        with patch("bot.SOURCES_DIR", sources_dir), \
-             patch("bot.SOURCES_CACHE_FILE", bad_cache_file), \
-             patch("bot.subprocess.run", return_value=MagicMock(stdout="")):
-            sources = bot.discover_hardware_profile()
-
-        captured = capsys.readouterr()
-        assert "Failed writing data cache map layout properties" in captured.out
-        assert sources[0]["type"] == "test_signal"
+# ======================================================================
+# discover_hardware_profile -- module aggregation, fallback, and cache
+# behavior is covered thoroughly in test_bot.py's TestDiscoverHardwareProfile
+# and TestLoadSourceModules now that bot.py has no ALSA/SDR-specific code
+# left to test here. The actual ALSA card-scanning and SDR chipset-detection
+# logic that used to be exercised in this file now lives in
+# sources/alsa.py and sources/sdr_radio.py (etc.), and is covered directly
+# in tests/test_sources_alsa.py and tests/test_sources_sdr.py.
+# ======================================================================
 
 
 # ======================================================================
@@ -325,29 +73,39 @@ class TestDiscoverHardwareProfileSdrBranch:
 # ======================================================================
 
 class TestSpawnHardwareCaptureStream:
-    def test_missing_profile_prints_and_returns(self, capsys):
-        with patch.object(bot, "load_matrix_source_profiles", return_value={}), \
-             patch.object(bot, "stop_active_hardware_process"):
-            bot.spawn_hardware_capture_stream({"type": "unknown_type"})
-        captured = capsys.readouterr()
-        assert "Configuration map profile missing" in captured.out
-
-    def test_empty_template_prints_and_returns(self, capsys):
-        profiles = {"usb_mic": {"pipeline_template": ""}}
-        with patch.object(bot, "load_matrix_source_profiles", return_value=profiles), \
-             patch.object(bot, "stop_active_hardware_process"):
-            bot.spawn_hardware_capture_stream({"type": "usb_mic"})
-        captured = capsys.readouterr()
-        assert "template structure empty" in captured.out
-
-    def test_spawns_subprocess_with_compiled_template(self):
-        profiles = {
-            "usb_mic": {
-                "pipeline_template": "arecord -D {device} -c {channels} >> {fifo_pipe}"
-            }
-        }
+    def test_unknown_source_falls_back_to_builtin_tone(self, capsys):
         fake_popen = MagicMock()
-        with patch.object(bot, "load_matrix_source_profiles", return_value=profiles), \
+        with patch.object(bot, "load_source_modules", return_value={}), \
+             patch.object(bot, "stop_active_hardware_process"), \
+             patch("bot.subprocess.Popen", return_value=fake_popen) as mock_popen, \
+             patch("bot.FIFO_PIPE", "/tmp/fake_pipe"):
+            bot.spawn_hardware_capture_stream({"type": "unknown_type"})
+
+        assert "no longer available" in capsys.readouterr().out
+        called_cmd = mock_popen.call_args[0][0]
+        assert "ffmpeg" in called_cmd
+        assert "/tmp/fake_pipe" in called_cmd
+
+    def test_module_raising_in_build_command_falls_back_to_builtin_tone(self, capsys):
+        broken_module = MagicMock()
+        broken_module.build_command.side_effect = RuntimeError("no hardware")
+        fake_popen = MagicMock()
+        with patch.object(bot, "load_source_modules", return_value={"broken": broken_module}), \
+             patch.object(bot, "stop_active_hardware_process"), \
+             patch("bot.subprocess.Popen", return_value=fake_popen) as mock_popen, \
+             patch("bot.FIFO_PIPE", "/tmp/fake_pipe"):
+            bot.spawn_hardware_capture_stream({"type": "broken"})
+
+        assert "raised while building its pipeline" in capsys.readouterr().out
+        called_cmd = mock_popen.call_args[0][0]
+        assert "ffmpeg" in called_cmd
+
+    def test_spawns_subprocess_with_modules_compiled_command(self):
+        usb_mic_module = MagicMock()
+        usb_mic_module.build_command.return_value = "arecord -D plughw:0,0 -c 2 >> /tmp/fake_pipe"
+        fake_popen = MagicMock()
+
+        with patch.object(bot, "load_source_modules", return_value={"usb_mic": usb_mic_module}), \
              patch.object(bot, "stop_active_hardware_process"), \
              patch("bot.subprocess.Popen", return_value=fake_popen) as mock_popen, \
              patch("bot.FIFO_PIPE", "/tmp/fake_pipe"):
@@ -359,14 +117,28 @@ class TestSpawnHardwareCaptureStream:
         assert "/tmp/fake_pipe" in called_cmd
         assert mock_popen.call_args.kwargs["shell"] is True
         assert mock_popen.call_args.kwargs["start_new_session"] is True
+        # bot.py forwarded the active source dict straight through untouched
+        usb_mic_module.build_command.assert_called_once()
+        call_kwargs = usb_mic_module.build_command.call_args
+        assert call_kwargs.kwargs["fifo_pipe"] == "/tmp/fake_pipe"
 
     def test_stops_previous_process_first(self):
-        profiles = {"usb_mic": {"pipeline_template": "cmd >> {fifo_pipe}"}}
-        with patch.object(bot, "load_matrix_source_profiles", return_value=profiles), \
+        usb_mic_module = MagicMock()
+        usb_mic_module.build_command.return_value = "cmd >> /tmp/fake_pipe"
+        with patch.object(bot, "load_source_modules", return_value={"usb_mic": usb_mic_module}), \
              patch.object(bot, "stop_active_hardware_process") as mock_stop, \
              patch("bot.subprocess.Popen", return_value=MagicMock()):
             bot.spawn_hardware_capture_stream({"type": "usb_mic"})
         mock_stop.assert_called_once()
+
+    def test_builtin_fallback_type_never_looks_up_modules(self):
+        """The builtin fallback source should never trigger a module lookup
+        at all -- it's the one thing bot.py is allowed to know about directly."""
+        with patch.object(bot, "load_source_modules") as mock_load, \
+             patch.object(bot, "stop_active_hardware_process"), \
+             patch("bot.subprocess.Popen", return_value=MagicMock()):
+            bot.spawn_hardware_capture_stream(dict(bot.BUILTIN_FALLBACK_SOURCE))
+        mock_load.assert_not_called()
 
 
 # ======================================================================
@@ -836,6 +608,20 @@ class TestSetInputListMode:
         assert "probe(s) failed" in response_text
 
     def test_list_mode_no_hardware_detected(self):
+        """With the JSON-era special-case removed, `test_signal` shows up in
+        the list like any other source -- the "no hardware" message now only
+        appears when discovery genuinely returns nothing at all."""
+        interaction = make_interaction()
+        with patch.object(bot, "discover_hardware_profile", return_value=[]), \
+             patch.object(bot, "scan_sources_for_signal", return_value={}):
+            run(bot.set_input.callback(interaction, None))
+
+        response_text = str(interaction.followup.send.call_args)
+        assert "No physical audio hardware" in response_text
+
+    def test_list_mode_shows_every_discovered_source_including_test_signal(self):
+        """test_signal is just a normal, listed source now -- bot.py has no
+        special-case code hiding it anymore."""
         interaction = make_interaction()
         sources = [{"type": "test_signal", "device": "virtual", "description": "Test"}]
         with patch.object(bot, "discover_hardware_profile", return_value=sources), \
@@ -843,7 +629,8 @@ class TestSetInputListMode:
             run(bot.set_input.callback(interaction, None))
 
         response_text = str(interaction.followup.send.call_args)
-        assert "No physical audio hardware" in response_text
+        assert "Test" in response_text
+        assert "No physical audio hardware" not in response_text
 
 
 class TestSetInputSwitchMode:
@@ -928,14 +715,19 @@ class TestAutoInputCommand:
         run(bot.auto_input.callback(interaction))
         interaction.response.send_message.assert_called_once()
 
-    def test_no_mic_sources(self):
+    def test_no_probeable_sources(self):
+        """test_signal (and any other source without probe_signal) isn't
+        probeable -- /radio auto should say so generically, without any
+        ALSA/USB-specific wording baked into bot.py."""
         channel = MagicMock()
         interaction = make_interaction(user_voice_channel=channel)
         sources = [{"type": "test_signal", "device": "virtual"}]
-        with patch.object(bot, "discover_hardware_profile", return_value=sources):
+        no_probe_module = MagicMock(spec=[])  # no probe_signal attribute at all
+        with patch.object(bot, "discover_hardware_profile", return_value=sources), \
+             patch.object(bot, "load_source_modules", return_value={"test_signal": no_probe_module}):
             run(bot.auto_input.callback(interaction))
         interaction.followup.send.assert_called_once()
-        assert "No USB microphone" in str(interaction.followup.send.call_args)
+        assert "No probeable input interfaces" in str(interaction.followup.send.call_args)
 
     def test_finds_live_source(self):
         channel = MagicMock()
@@ -944,8 +736,10 @@ class TestAutoInputCommand:
             {"type": "usb_mic", "device": "plughw:0,0", "description": "Mic A"},
             {"type": "usb_mic", "device": "plughw:1,0", "description": "Mic B"},
         ]
+        usb_mic_module = MagicMock()
+        usb_mic_module.probe_signal.side_effect = [("signal", "rms=99")]
         with patch.object(bot, "discover_hardware_profile", return_value=sources), \
-             patch.object(bot, "probe_device_has_signal", side_effect=[("signal", "rms=99")]), \
+             patch.object(bot, "load_source_modules", return_value={"usb_mic": usb_mic_module}), \
              patch.object(bot, "execute_stream_pipeline", new=AsyncMock()) as mock_exec:
             run(bot.auto_input.callback(interaction))
 
@@ -960,8 +754,10 @@ class TestAutoInputCommand:
         sources = [
             {"type": "usb_mic", "device": "plughw:0,0", "description": "Mic A"},
         ]
+        usb_mic_module = MagicMock()
+        usb_mic_module.probe_signal.return_value = ("silent", "rms=0")
         with patch.object(bot, "discover_hardware_profile", return_value=sources), \
-             patch.object(bot, "probe_device_has_signal", return_value=("silent", "rms=0")):
+             patch.object(bot, "load_source_modules", return_value={"usb_mic": usb_mic_module}):
             run(bot.auto_input.callback(interaction))
 
         response_text = str(interaction.followup.send.call_args_list[-1])
@@ -973,8 +769,10 @@ class TestAutoInputCommand:
         sources = [
             {"type": "usb_mic", "device": "plughw:0,0", "description": "Mic A"},
         ]
+        usb_mic_module = MagicMock()
+        usb_mic_module.probe_signal.return_value = ("error", "busy")
         with patch.object(bot, "discover_hardware_profile", return_value=sources), \
-             patch.object(bot, "probe_device_has_signal", return_value=("error", "busy")):
+             patch.object(bot, "load_source_modules", return_value={"usb_mic": usb_mic_module}):
             run(bot.auto_input.callback(interaction))
 
         response_text = str(interaction.followup.send.call_args_list[-1])
@@ -988,15 +786,29 @@ class TestAutoInputCommand:
             {"type": "usb_mic", "device": "plughw:0,0", "description": "Mic A"},
             {"type": "usb_mic", "device": "plughw:1,0", "description": "Mic B"},
         ]
+        usb_mic_module = MagicMock()
+        usb_mic_module.probe_signal.side_effect = [("error", "busy"), ("signal", "rms=200")]
         with patch.object(bot, "discover_hardware_profile", return_value=sources), \
-             patch.object(bot, "probe_device_has_signal",
-                           side_effect=[("error", "busy"), ("signal", "rms=200")]), \
+             patch.object(bot, "load_source_modules", return_value={"usb_mic": usb_mic_module}), \
              patch.object(bot, "execute_stream_pipeline", new=AsyncMock()) as mock_exec:
             run(bot.auto_input.callback(interaction))
 
         mock_exec.assert_called_once()
         kwargs = mock_exec.call_args.kwargs
         assert kwargs["force_device"] == "plughw:1,0"
+
+    def test_probe_signal_raising_is_treated_as_error_not_a_crash(self):
+        channel = MagicMock()
+        interaction = make_interaction(user_voice_channel=channel)
+        sources = [{"type": "flaky", "device": "dev0", "description": "Flaky"}]
+        flaky_module = MagicMock()
+        flaky_module.probe_signal.side_effect = RuntimeError("boom")
+        with patch.object(bot, "discover_hardware_profile", return_value=sources), \
+             patch.object(bot, "load_source_modules", return_value={"flaky": flaky_module}):
+            run(bot.auto_input.callback(interaction))
+
+        response_text = str(interaction.followup.send.call_args_list[-1])
+        assert "boom" in response_text
 
 
 # ======================================================================
@@ -1647,15 +1459,21 @@ class TestClearStreamStateExceptionBranch:
         assert "Failed updating connection state parameters" in captured.out
 
 
-class TestSelfHealExceptionBranch:
-    def test_write_failure_does_not_raise(self, tmp_path, capsys):
+class TestLoadPackageAllowlistExceptionBranch:
+    def test_seed_write_failure_falls_back_to_in_memory_default(self, tmp_path, capsys):
+        """Mirrors the old self-heal exception-branch test, but for the new
+        dependency-guard allowlist seeding: a genuinely unwritable path
+        (parent is a file, not a directory) should be caught and logged,
+        falling back to the small in-memory default rather than raising."""
         blocker = tmp_path / "blocker"
         blocker.write_text("i am a file, not a directory")
-        bad_sources_dir = str(blocker / "sub")
-        with patch("bot.SOURCES_DIR", bad_sources_dir):
-            bot.self_heal_test_signal_profile()  # should not raise
+        bad_allowlist_file = str(blocker / "sub" / "package_allowlist.json")
+        with patch("bot.PACKAGE_ALLOWLIST_FILE", bad_allowlist_file), \
+             patch("bot.PACKAGE_ALLOWLIST_TEMPLATE", "/nonexistent-template.json"):
+            allowlist = bot.load_package_allowlist()
         captured = capsys.readouterr()
-        assert "Failed to write fallback matrix" in captured.out
+        assert "Failed to seed package allowlist" in captured.out
+        assert "ffmpeg" in allowlist
 
 
 class TestStopActiveHardwareProcessMore:
