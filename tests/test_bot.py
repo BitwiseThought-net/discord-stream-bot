@@ -163,57 +163,81 @@ class TestParseDurationToSeconds:
 # ======================================================================
 
 class TestParseScanRange:
-    """Cover the scan-range regex and validation."""
+    """Cover the scan-range regex and validation.
+
+    default_start_mhz/default_end_mhz/max_span_mhz are supplied by the
+    caller (in production, read off the active source module's own
+    SCAN_DEFAULT_START_MHZ/SCAN_DEFAULT_END_MHZ/SCAN_MAX_SPAN_MHZ) since
+    bot.py itself has no opinion on what a sensible default band is."""
+
+    DEFAULT_START = 88.0
+    DEFAULT_END = 108.0
+    MAX_SPAN = 60.0
+
+    def _parse(self, arg):
+        return bot.parse_scan_range(
+            arg, default_start_mhz=self.DEFAULT_START,
+            default_end_mhz=self.DEFAULT_END, max_span_mhz=self.MAX_SPAN,
+        )
 
     def test_no_scan_returns_none(self):
-        assert bot.parse_scan_range("94.9M") is None
+        assert self._parse("94.9M") is None
 
     def test_scan_default_returns_defaults(self):
-        result = bot.parse_scan_range("scan")
+        result = self._parse("scan")
         assert result == (
-            bot.SCAN_DEFAULT_START_MHZ * 1_000_000,
-            bot.SCAN_DEFAULT_END_MHZ * 1_000_000,
+            self.DEFAULT_START * 1_000_000,
+            self.DEFAULT_END * 1_000_000,
         )
 
     def test_scan_with_range(self):
-        result = bot.parse_scan_range("scan 88-108")
+        result = self._parse("scan 88-108")
         assert result == (88_000_000, 108_000_000)
 
     def test_scan_with_decimal_range(self):
-        result = bot.parse_scan_range("scan 87.5-108.5")
+        result = self._parse("scan 87.5-108.5")
         assert result == (87_500_000, 108_500_000)
 
     def test_scan_trailing_m(self):
         # The optional trailing "m" applies once, after the whole "start-end"
         # pair, not after each individual number.
-        result = bot.parse_scan_range("scan 88-108M")
+        result = self._parse("scan 88-108M")
         assert result == (88_000_000, 108_000_000)
 
     def test_scan_m_after_each_number_does_not_match(self):
         """'88M-108M' (m glued to each number) isn't part of the grammar, so
         this isn't recognized as a scan request at all."""
-        result = bot.parse_scan_range("scan 88M-108M")
+        result = self._parse("scan 88M-108M")
         assert result is None
 
     def test_scan_spaces_around_dash(self):
-        result = bot.parse_scan_range("scan  88  -  108  ")
+        result = self._parse("scan  88  -  108  ")
         assert result == (88_000_000, 108_000_000)
 
     def test_scan_end_equal_to_start_raises(self):
         with pytest.raises(ValueError, match="greater than"):
-            bot.parse_scan_range("scan 88-88")
+            self._parse("scan 88-88")
 
     def test_scan_negative_span_raises(self):
         with pytest.raises(ValueError, match="greater than"):
-            bot.parse_scan_range("scan 108-88")
+            self._parse("scan 108-88")
 
     def test_scan_too_wide_raises(self):
         with pytest.raises(ValueError, match="capped at"):
-            bot.parse_scan_range("scan 20-200")  # 180 MHz span > 60 cap
+            self._parse("scan 20-200")  # 180 MHz span > 60 cap
 
     def test_scan_case_insensitive(self):
-        result = bot.parse_scan_range("SCAN 88-108")
+        result = self._parse("SCAN 88-108")
         assert result == (88_000_000, 108_000_000)
+
+    def test_custom_defaults_are_honored(self):
+        """A caller supplying different band defaults (e.g. a different
+        SDR-backed source with its own policy) should get those instead of
+        this test class's own 88-108 defaults."""
+        result = bot.parse_scan_range(
+            "scan", default_start_mhz=118.0, default_end_mhz=137.0, max_span_mhz=60.0
+        )
+        assert result == (118_000_000, 137_000_000)
 
 
 # ======================================================================
@@ -561,188 +585,13 @@ class TestScanSourcesForSignal:
 
 
 # ======================================================================
-# merge_nearby_channels
+# Note: merge_nearby_channels, find_peaks_in_step, capture_iq_samples, and
+# scan_for_clear_channels_sync used to live here, but moved to
+# actions/scan_range.py as part of the "generic action dispatch" refactor
+# (bot.py no longer contains any RTL-SDR/FFT-specific code at all -- it only
+# knows how to call whatever `scan_range` function the active source
+# advertises via SUPPORTED_ACTIONS). See tests/test_actions_scan_range.py.
 # ======================================================================
-
-class TestMergeNearbyChannels:
-    def test_no_merge_when_spaced(self):
-        candidates = [
-            (94_000_000, -20.0),
-            (100_000_000, -30.0),
-        ]
-        result = bot.merge_nearby_channels(candidates)
-        assert len(result) == 2
-
-    def test_merge_closely_spaced(self):
-        candidates = [
-            (94_000_000, -20.0),
-            (94_150_000, -30.0),  # within SCAN_MIN_CHANNEL_SPACING_HZ
-        ]
-        result = bot.merge_nearby_channels(candidates)
-        assert len(result) == 1
-        # Should keep the stronger peak
-        assert result[0][1] == -20.0
-
-    def test_merge_keeps_strongest(self):
-        candidates = [
-            (94_000_000, -50.0),
-            (94_100_000, -10.0),  # stronger but second
-        ]
-        result = bot.merge_nearby_channels(candidates)
-        assert len(result) == 1
-        assert result[0][1] == -10.0
-
-    def test_empty_list(self):
-        assert bot.merge_nearby_channels([]) == []
-
-    def test_single_entry(self):
-        result = bot.merge_nearby_channels([(94_000_000, -20.0)])
-        assert len(result) == 1
-
-
-# ======================================================================
-# find_peaks_in_step (numpy required)
-# ======================================================================
-
-class TestFindPeaksInStep:
-    def test_no_samples_below_fft_size(self):
-        samples = np.zeros(100, dtype=np.complex64)
-        result = bot.find_peaks_in_step(100_000_000, 2_400_000, samples)
-        assert result == []
-
-    def test_no_peaks_above_threshold(self):
-        """Uniform noise — median should place threshold above all values."""
-        rng = np.random.default_rng(42)
-        samples = rng.standard_normal(16384).astype(np.complex64)
-        # All bins are normal noise; with median ~0 and threshold ~12 dB,
-        # none should clear (since values are typically < 12 in std-norm data).
-        # But to be safe: the peak threshold is relative to the step's own floor,
-        # so uniform noise has no distinct peaks.
-        result = bot.find_peaks_in_step(100_000_000, 2_400_000, samples)
-        assert isinstance(result, list)
-
-    def test_with_signal_peak(self):
-        """Inject a strong peak at center frequency — should appear."""
-        rng = np.random.default_rng(123)
-        noise = rng.standard_normal(16384).astype(np.complex64) * 0.01
-        samples = noise.copy()
-        # Add a strong signal (amplitude >> noise)
-        center_bin = bot.SCAN_FFT_SIZE // 2
-        window = np.hanning(bot.SCAN_FFT_SIZE)
-        samples[:bot.SCAN_FFT_SIZE] *= window
-
-        # We'll just verify it returns a list; the exact peak detection is an implementation detail.
-        result = bot.find_peaks_in_step(100_000_000, 2_400_000, samples)
-        assert isinstance(result, list)
-
-
-# ======================================================================
-# capture_iq_samples — subprocess call to rtl_sdr
-# ======================================================================
-
-class TestCaptureIqSamples:
-    def test_success_returns_complex_array(self):
-        """Simulate rtl_sdr returning raw IQ bytes."""
-        num_iq_pairs = int(bot.SCAN_SAMPLE_RATE_HZ * bot.SCAN_CAPTURE_SECONDS)
-        num_bytes = num_iq_pairs * 2
-        # Generate fake unsigned 8-bit IQ data centered at 127.5
-        rng = np.random.default_rng(42)
-        iq_data = (rng.random(num_bytes) * 255).astype(np.uint8)
-
-        proc = MagicMock(returncode=0, stdout=iq_data.tobytes())
-        with patch("subprocess.run", return_value=proc):
-            result = bot.capture_iq_samples(100_000_000, bot.SCAN_SAMPLE_RATE_HZ, bot.SCAN_CAPTURE_SECONDS)
-
-        assert isinstance(result, np.ndarray)
-        assert result.dtype.kind == "c"
-        assert len(result) > 0
-
-    def test_failure_raises(self):
-        proc = MagicMock(returncode=1, stdout=b"", stderr=b"Failed to open device")
-        with patch("subprocess.run", return_value=proc):
-            with pytest.raises(RuntimeError, match="Failed to open device"):
-                bot.capture_iq_samples(100_000_000, bot.SCAN_SAMPLE_RATE_HZ, bot.SCAN_CAPTURE_SECONDS)
-
-    def test_no_output_raises(self):
-        proc = MagicMock(returncode=0, stdout=b"", stderr=b"")
-        with patch("subprocess.run", return_value=proc):
-            with pytest.raises(RuntimeError, match="no samples"):
-                bot.capture_iq_samples(100_000_000, bot.SCAN_SAMPLE_RATE_HZ, bot.SCAN_CAPTURE_SECONDS)
-
-    def test_output_too_short_raises(self):
-        proc = MagicMock(returncode=0, stdout=b"\x80", stderr=b"")  # only 1 byte
-        with patch("subprocess.run", return_value=proc):
-            with pytest.raises(RuntimeError, match="no samples"):
-                bot.capture_iq_samples(100_000_000, bot.SCAN_SAMPLE_RATE_HZ, bot.SCAN_CAPTURE_SECONDS)
-
-    def test_failure_multiline_stderr_uses_last_line(self):
-        proc = MagicMock(returncode=1, stdout=b"", stderr=b"warning: x\nusb_claim_interface error -6")
-        with patch("subprocess.run", return_value=proc):
-            with pytest.raises(RuntimeError, match="usb_claim_interface"):
-                bot.capture_iq_samples(100_000_000, bot.SCAN_SAMPLE_RATE_HZ, bot.SCAN_CAPTURE_SECONDS)
-
-
-# ======================================================================
-# scan_for_clear_channels_sync — blocking sweep
-# ======================================================================
-
-class TestScanForClearChannelsSync:
-    def test_single_step_no_peaks(self):
-        """rtl_sdr capture succeeds but returns no peaks → empty catalog."""
-        fake_samples = np.zeros(bot.SCAN_FFT_SIZE * 2, dtype=np.complex64)
-
-        def fake_capture(*args, **kwargs):
-            return fake_samples
-
-        with patch.object(bot, "capture_iq_samples", side_effect=fake_capture), \
-             patch.object(bot, "find_peaks_in_step", return_value=[]):
-            result = bot.scan_for_clear_channels_sync(94_000_000, 95_000_000)
-
-        assert result == []
-
-    def test_single_step_with_peaks(self):
-        # Simulate one peak at 94.5 MHz
-        fake_peaks = [(94_500_000, -15.0)]
-
-        def fake_capture(*args, **kwargs):
-            return np.zeros(bot.SCAN_FFT_SIZE * 2, dtype=np.complex64)
-
-        with patch.object(bot, "capture_iq_samples", side_effect=fake_capture), \
-             patch.object(bot, "find_peaks_in_step", return_value=fake_peaks):
-            result = bot.scan_for_clear_channels_sync(94_000_000, 95_000_000)
-
-        assert len(result) == 1
-        assert result[0]["power_db"] == -15.0
-
-    def test_multi_step_skips_failed_capture(self):
-        """A capture failure on one step shouldn't abort the whole sweep."""
-        calls = {"n": 0}
-
-        def flaky_capture(*args, **kwargs):
-            calls["n"] += 1
-            if calls["n"] == 1:
-                raise RuntimeError("dongle busy")
-            return np.zeros(bot.SCAN_FFT_SIZE * 2, dtype=np.complex64)
-
-        with patch.object(bot, "capture_iq_samples", side_effect=flaky_capture), \
-             patch.object(bot, "find_peaks_in_step", return_value=[]):
-            result = bot.scan_for_clear_channels_sync(88_000_000, 108_000_000)
-
-        assert calls["n"] > 1
-        assert result == []
-
-    def test_filters_out_of_range_peaks(self):
-        """Peaks outside [start_hz, end_hz] should be dropped from the catalog."""
-        fake_peaks = [(80_000_000, -10.0)]  # below start_hz
-
-        def fake_capture(*args, **kwargs):
-            return np.zeros(bot.SCAN_FFT_SIZE * 2, dtype=np.complex64)
-
-        with patch.object(bot, "capture_iq_samples", side_effect=fake_capture), \
-             patch.object(bot, "find_peaks_in_step", return_value=fake_peaks):
-            result = bot.scan_for_clear_channels_sync(94_000_000, 95_000_000)
-
-        assert result == []
 
 
 # ======================================================================
@@ -861,32 +710,188 @@ class TestExecuteStreamPipeline:
 
 
 # ======================================================================
-# execute_channel_scan — validation path
+# get_current_source_type
+# ======================================================================
+
+class TestGetCurrentSourceType:
+    def test_defaults_to_test_signal_when_no_state_file(self, tmp_path):
+        with patch("bot.STATE_FILE", str(tmp_path / "state.json")):
+            assert bot.get_current_source_type() == "test_signal"
+
+    def test_reads_selected_source_from_state_file(self, tmp_path):
+        state_file = tmp_path / "state.json"
+        state_file.write_text(json.dumps({"selected_source": "sdr_radio"}))
+        with patch("bot.STATE_FILE", str(state_file)):
+            assert bot.get_current_source_type() == "sdr_radio"
+
+    def test_corrupt_state_file_falls_back_to_test_signal(self, tmp_path):
+        state_file = tmp_path / "state.json"
+        state_file.write_text("not valid json{{{")
+        with patch("bot.STATE_FILE", str(state_file)):
+            assert bot.get_current_source_type() == "test_signal"
+
+    def test_missing_selected_source_key_falls_back(self, tmp_path):
+        state_file = tmp_path / "state.json"
+        state_file.write_text(json.dumps({"something_else": True}))
+        with patch("bot.STATE_FILE", str(state_file)):
+            assert bot.get_current_source_type() == "test_signal"
+
+
+# ======================================================================
+# handle_channel_scan_request — the "does the active source even support
+# scanning" gate, plus delegation to execute_channel_scan
+# ======================================================================
+
+class TestHandleChannelScanRequest:
+    def test_no_active_module_sends_unsupported_message(self):
+        interaction = AsyncMock()
+        with patch.object(bot, "get_current_source_type", return_value="test_signal"), \
+             patch.object(bot, "load_source_modules", return_value={}):
+            asyncio.get_event_loop().run_until_complete(
+                bot.handle_channel_scan_request(interaction, "scan")
+            )
+        interaction.response.send_message.assert_called_once()
+        assert "doesn't support frequency scanning" in str(interaction.response.send_message.call_args)
+
+    def test_module_without_supported_actions_sends_unsupported_message(self):
+        interaction = AsyncMock()
+        module = MagicMock(spec=["DESCRIPTION"])  # no SUPPORTED_ACTIONS, no scan_range
+        module.DESCRIPTION = "Test Signal"
+        with patch.object(bot, "get_current_source_type", return_value="test_signal"), \
+             patch.object(bot, "load_source_modules", return_value={"test_signal": module}):
+            asyncio.get_event_loop().run_until_complete(
+                bot.handle_channel_scan_request(interaction, "scan")
+            )
+        response = str(interaction.response.send_message.call_args)
+        assert "doesn't support frequency scanning" in response
+        assert "Test Signal" in response
+
+    def test_module_with_actions_but_no_scan_range_attr_is_unsupported(self):
+        """SUPPORTED_ACTIONS claims scan_range, but the function itself is
+        missing -- should still be treated as unsupported, not raise."""
+        interaction = AsyncMock()
+        module = MagicMock(spec=["SUPPORTED_ACTIONS", "DESCRIPTION"])
+        module.SUPPORTED_ACTIONS = ["scan_range"]
+        module.DESCRIPTION = "Weird Source"
+        with patch.object(bot, "get_current_source_type", return_value="weird"), \
+             patch.object(bot, "load_source_modules", return_value={"weird": module}):
+            asyncio.get_event_loop().run_until_complete(
+                bot.handle_channel_scan_request(interaction, "scan")
+            )
+        assert "doesn't support frequency scanning" in str(interaction.response.send_message.call_args)
+
+    def test_invalid_range_sends_warning_not_execute(self):
+        interaction = AsyncMock()
+        module = MagicMock()
+        module.SUPPORTED_ACTIONS = ["scan_range"]
+        module.scan_range = MagicMock()
+        module.SCAN_DEFAULT_START_MHZ = 88.0
+        module.SCAN_DEFAULT_END_MHZ = 108.0
+        module.SCAN_MAX_SPAN_MHZ = 60.0
+        with patch.object(bot, "get_current_source_type", return_value="sdr_radio"), \
+             patch.object(bot, "load_source_modules", return_value={"sdr_radio": module}), \
+             patch.object(bot, "execute_channel_scan", new=AsyncMock()) as mock_exec:
+            asyncio.get_event_loop().run_until_complete(
+                bot.handle_channel_scan_request(interaction, "scan 200-20")
+            )
+        mock_exec.assert_not_called()
+        assert "greater than" in str(interaction.response.send_message.call_args)
+
+    def test_valid_range_delegates_to_execute_channel_scan(self):
+        interaction = AsyncMock()
+        module = MagicMock()
+        module.SUPPORTED_ACTIONS = ["scan_range"]
+        module.scan_range = MagicMock()
+        module.DESCRIPTION = "Radio (FM & HAM)"
+        module.SCAN_DEFAULT_START_MHZ = 88.0
+        module.SCAN_DEFAULT_END_MHZ = 108.0
+        module.SCAN_MAX_SPAN_MHZ = 60.0
+        with patch.object(bot, "get_current_source_type", return_value="sdr_radio"), \
+             patch.object(bot, "load_source_modules", return_value={"sdr_radio": module}), \
+             patch.object(bot, "execute_channel_scan", new=AsyncMock()) as mock_exec:
+            asyncio.get_event_loop().run_until_complete(
+                bot.handle_channel_scan_request(interaction, "scan 88-108")
+            )
+        mock_exec.assert_called_once()
+        args, kwargs = mock_exec.call_args
+        assert args[1] == (88_000_000, 108_000_000)
+        assert args[2] is module.scan_range
+        assert kwargs["active_description"] == "Radio (FM & HAM)"
+
+    def test_missing_band_defaults_fall_back_to_generic_values(self):
+        """A source that supports scan_range but doesn't declare its own
+        SCAN_DEFAULT_*/MAX_SPAN policy should still work, using bot.py's
+        generic fallback numbers rather than raising."""
+        interaction = AsyncMock()
+        module = MagicMock(spec=["SUPPORTED_ACTIONS", "scan_range", "DESCRIPTION"])
+        module.SUPPORTED_ACTIONS = ["scan_range"]
+        module.scan_range = MagicMock()
+        module.DESCRIPTION = "Bare Source"
+        with patch.object(bot, "get_current_source_type", return_value="bare"), \
+             patch.object(bot, "load_source_modules", return_value={"bare": module}), \
+             patch.object(bot, "execute_channel_scan", new=AsyncMock()) as mock_exec:
+            asyncio.get_event_loop().run_until_complete(
+                bot.handle_channel_scan_request(interaction, "scan")
+            )
+        mock_exec.assert_called_once()
+        args, _ = mock_exec.call_args
+        assert args[1] == (88_000_000 * 1.0, 108_000_000 * 1.0)
+
+
+# ======================================================================
+# execute_channel_scan — hardware-agnostic scan runner
 # ======================================================================
 
 class TestExecuteChannelScan:
-    def test_no_rtl_sdr(self):
-        fake_interaction = AsyncMock()
-        with patch("bot.shutil.which", return_value=None), \
-             patch.object(bot.bot, "hardware_process", None):
-            import asyncio
-            asyncio.get_event_loop().run_until_complete(
-                bot.execute_channel_scan(fake_interaction, (94_000_000, 95_000_000))
-            )
-        fake_interaction.response.send_message.assert_called_once()
-        assert "rtl_sdr" in str(fake_interaction.response.send_message.call_args)
+    def test_pauses_active_pipeline_before_scanning(self):
+        interaction = AsyncMock()
+        scan_fn = MagicMock(return_value=[])
+        bot.bot.hardware_process = MagicMock()
+        try:
+            with patch.object(bot, "stop_active_hardware_process") as mock_stop:
+                asyncio.get_event_loop().run_until_complete(
+                    bot.execute_channel_scan(interaction, (94_000_000, 95_000_000), scan_fn, active_description="Radio")
+                )
+        finally:
+            bot.bot.hardware_process = None
+        mock_stop.assert_called_once()
+        all_calls = " ".join(str(c) for c in interaction.followup.send.call_args_list)
+        assert "Pausing the active pipeline" in all_calls
+        assert "Radio" in all_calls
 
-    def test_no_numpy(self):
-        fake_interaction = AsyncMock()
-        with patch("bot.shutil.which", return_value="/usr/bin/rtl_sdr"), \
-             patch.object(bot, "NUMPY_AVAILABLE", False), \
-             patch.object(bot.bot, "hardware_process", None):
-            import asyncio
-            asyncio.get_event_loop().run_until_complete(
-                bot.execute_channel_scan(fake_interaction, (94_000_000, 95_000_000))
-            )
-        fake_interaction.response.send_message.assert_called_once()
-        assert "numpy" in str(fake_interaction.response.send_message.call_args)
+    def test_no_channels_found_message(self):
+        interaction = AsyncMock()
+        bot.bot.hardware_process = None
+        scan_fn = MagicMock(return_value=[])
+        asyncio.get_event_loop().run_until_complete(
+            bot.execute_channel_scan(interaction, (94_000_000, 95_000_000), scan_fn, active_description="Radio")
+        )
+        all_calls = " ".join(str(c) for c in interaction.followup.send.call_args_list)
+        assert "No channels above the noise floor" in all_calls
+
+    def test_channels_found_lists_catalog(self):
+        interaction = AsyncMock()
+        bot.bot.hardware_process = None
+        catalog = [{"frequency": "94.5M", "power_db": -12.3}]
+        scan_fn = MagicMock(return_value=catalog)
+        asyncio.get_event_loop().run_until_complete(
+            bot.execute_channel_scan(interaction, (94_000_000, 95_000_000), scan_fn, active_description="Radio")
+        )
+        all_calls = " ".join(str(c) for c in interaction.followup.send.call_args_list)
+        assert "Clear Channels Found" in all_calls
+        assert "94.5M" in all_calls
+        assert "-12.3" in all_calls
+
+    def test_scan_exception_reports_failure(self):
+        interaction = AsyncMock()
+        bot.bot.hardware_process = None
+        scan_fn = MagicMock(side_effect=RuntimeError("dongle unplugged"))
+        asyncio.get_event_loop().run_until_complete(
+            bot.execute_channel_scan(interaction, (94_000_000, 95_000_000), scan_fn, active_description="Radio")
+        )
+        all_calls = " ".join(str(c) for c in interaction.followup.send.call_args_list)
+        assert "Scan failed" in all_calls
+        assert "dongle unplugged" in all_calls
 
 
 # ======================================================================
@@ -894,16 +899,19 @@ class TestExecuteChannelScan:
 # ======================================================================
 
 class TestScanRangeEdgeCases:
+    def _parse(self, arg):
+        return bot.parse_scan_range(arg, default_start_mhz=88.0, default_end_mhz=108.0, max_span_mhz=60.0)
+
     def test_only_scan_keyword_with_uppercase(self):
-        result = bot.parse_scan_range("SCAN")
+        result = self._parse("SCAN")
         assert result is not None
 
     def test_scan_with_leading_zero(self):
-        result = bot.parse_scan_range("scan 088-108")
+        result = self._parse("scan 088-108")
         assert result == (88_000_000, 108_000_000)
 
     def test_scan_with_single_digit(self):
-        result = bot.parse_scan_range("scan 8-12")
+        result = self._parse("scan 8-12")
         assert result == (8_000_000, 12_000_000)
 
 
@@ -986,14 +994,17 @@ class TestBuiltinFallback:
 # ======================================================================
 
 class TestParseScanRangeMore:
+    def _parse(self, arg):
+        return bot.parse_scan_range(arg, default_start_mhz=88.0, default_end_mhz=108.0, max_span_mhz=60.0)
+
     def test_scan_with_only_start(self):
         """'scan 88-' should still parse."""
-        result = bot.parse_scan_range("scan 88-")
+        result = self._parse("scan 88-")
         # The regex requires both groups, so this returns None → not a scan
         assert result is None
 
     def test_scan_non_numeric_does_not_match_returns_none(self):
         """Non-numeric input doesn't match the regex at all (it requires
         digits), so this isn't recognized as a scan request."""
-        result = bot.parse_scan_range("scan abc-def")
+        result = self._parse("scan abc-def")
         assert result is None
