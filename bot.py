@@ -14,12 +14,6 @@ import discord
 from discord import app_commands
 from discord.ext import commands
 
-try:
-    import numpy as np
-    NUMPY_AVAILABLE = True
-except ImportError:
-    NUMPY_AVAILABLE = False
-
 # =========================================================================
 # SOURCE PLUGIN CONTRACT
 # =========================================================================
@@ -896,14 +890,12 @@ async def auto_input(interaction: discord.Interaction):
 async def tune_channel(interaction: discord.Interaction, frequency: str):
     global CURRENT_TUNED_CHANNEL
 
-    try:
-        scan_range = parse_scan_range(frequency)
-    except ValueError as e:
-        await interaction.response.send_message(f"⚠️ {e}", ephemeral=True)
-        return
-
-    if scan_range is not None:
-        await execute_channel_scan(interaction, scan_range)
+    # Just a lightweight "does this look like a scan request at all" check --
+    # the actual parsing (which needs the active source's own MHz defaults)
+    # happens inside handle_channel_scan_request, after we know whether the
+    # active source even supports scanning.
+    if re.match(r'^\s*scan(\s|$)', frequency.strip().lower()):
+        await handle_channel_scan_request(interaction, frequency)
         return
 
     clean_freq = frequency.strip().upper()
@@ -1121,24 +1113,44 @@ async def on_ready():
         clear_stream_state()
 
 # =========================================================================
-# 8. FFT-BASED CLEAR CHANNEL SCANNER
+# 8. GENERIC ACTION DISPATCH ("/radio channel scan")
 # =========================================================================
-SCAN_DEFAULT_START_MHZ = 88.0
-SCAN_DEFAULT_END_MHZ = 108.0
-SCAN_SAMPLE_RATE_HZ = 2_400_000        # rtl-sdr's standard stable sample rate
-SCAN_CAPTURE_SECONDS = 0.25            # raw IQ capture window per sweep step
-SCAN_FFT_SIZE = 4096
-SCAN_STEP_OVERLAP = 0.9                # step by 90% of sample rate so band edges aren't missed
-SCAN_PEAK_THRESHOLD_DB = 12.0          # dB above a step's own noise floor to count as a channel
-SCAN_MIN_CHANNEL_SPACING_HZ = 200_000  # merge candidates closer than this, matches FM channel spacing
-SCAN_MAX_SPAN_MHZ = 60.0               # sanity cap so a mistyped range can't trigger a runaway scan
-SCAN_MAX_STEPS = 120
+# bot.py has no idea what a "scan" IS -- it only knows how to ask whichever
+# source is currently active whether it advertises "scan_range" in its
+# SUPPORTED_ACTIONS list (same shape as REQUIRED_PACKAGES), and if so, call
+# its scan_range(start_hz, end_hz) function. The actual RF/FFT mechanics
+# live in actions/scan_range.py, and any band-specific policy (which MHz
+# range "scan" with no arguments defaults to, channel spacing, etc.) lives
+# on the source module itself (see sources/sdr_radio.py). This keeps the
+# "SOURCE PLUGIN CONTRACT" promise that bot.py never mentions a specific
+# source by name.
 
-def parse_scan_range(frequency_arg: str):
+def get_current_source_type():
+    """Reads the currently selected source type out of STATE_FILE, the same
+    way the tuning/streaming code paths above do. Defaults to "test_signal"
+    if nothing has been selected yet or the file can't be read."""
+    if os.path.exists(STATE_FILE):
+        try:
+            with open(STATE_FILE, 'r') as f:
+                saved_data = json.load(f)
+            return saved_data.get("selected_source", "test_signal")
+        except Exception:
+            pass
+    return "test_signal"
+
+
+def parse_scan_range(frequency_arg: str, default_start_mhz: float,
+                      default_end_mhz: float, max_span_mhz: float):
     """Parses a '/radio channel' argument of 'scan' or 'scan <start>-<end>' (MHz)
     into a (start_hz, end_hz) tuple. Returns None if the argument isn't a scan
     request at all, so the caller falls through to normal single-frequency tuning.
-    Raises ValueError on a malformed or out-of-bounds range."""
+    Raises ValueError on a malformed or out-of-bounds range.
+
+    default_start_mhz/default_end_mhz/max_span_mhz are supplied by the
+    caller (normally read off the active source module's own
+    SCAN_DEFAULT_START_MHZ/SCAN_DEFAULT_END_MHZ/SCAN_MAX_SPAN_MHZ) since
+    what counts as a sensible default band is source-specific policy, not
+    something bot.py should hardcode."""
     clean = frequency_arg.strip().lower()
     match = re.match(r'^scan(?:\s+(\d+(?:\.\d+)?)\s*-\s*(\d+(?:\.\d+)?)\s*m?)?$', clean)
     if not match:
@@ -1148,178 +1160,79 @@ def parse_scan_range(frequency_arg: str):
         start_mhz = float(match.group(1))
         end_mhz = float(match.group(2))
     else:
-        start_mhz = SCAN_DEFAULT_START_MHZ
-        end_mhz = SCAN_DEFAULT_END_MHZ
+        start_mhz = default_start_mhz
+        end_mhz = default_end_mhz
 
     if end_mhz <= start_mhz:
         raise ValueError("scan end frequency must be greater than the start frequency, e.g. `scan 88-108`")
-    if (end_mhz - start_mhz) > SCAN_MAX_SPAN_MHZ:
-        raise ValueError(f"scan span is capped at {SCAN_MAX_SPAN_MHZ:.0f}MHz per run, try narrowing the range")
+    if (end_mhz - start_mhz) > max_span_mhz:
+        raise ValueError(f"scan span is capped at {max_span_mhz:.0f}MHz per run, try narrowing the range")
 
     return (start_mhz * 1_000_000, end_mhz * 1_000_000)
 
-def capture_iq_samples(center_hz: float, sample_rate: int, duration_s: float):
-    """Captures raw 8-bit IQ samples from the SDR dongle via rtl_sdr and returns them
-    as a complex numpy array centered on baseband. This needs exclusive access to the
-    dongle, callers must make sure no hardware pipeline (rtl_fm, etc.) currently holds
-    it open, or rtl_sdr will fail to claim the USB interface."""
-    num_iq_pairs = int(sample_rate * duration_s)
-    cmd = [
-        "rtl_sdr", "-f", str(int(center_hz)), "-s", str(sample_rate),
-        "-n", str(num_iq_pairs * 2), "-"
-    ]
-    result = subprocess.run(cmd, capture_output=True, timeout=duration_s + 5.0)
-    if result.returncode != 0 or len(result.stdout) < 2:
-        stderr_text = result.stderr.decode(errors="ignore").strip()
-        last_line = stderr_text.splitlines()[-1] if stderr_text else "rtl_sdr produced no samples"
-        raise RuntimeError(last_line)
 
-    raw = np.frombuffer(result.stdout, dtype=np.uint8).astype(np.float64)
-    raw = raw[: len(raw) - (len(raw) % 2)]
-    iq = (raw - 127.5) / 127.5
-    i_samples = iq[0::2]
-    q_samples = iq[1::2]
-    n = min(len(i_samples), len(q_samples))
-    return i_samples[:n] + 1j * q_samples[:n]
+async def handle_channel_scan_request(interaction: discord.Interaction, frequency_arg: str):
+    """Entry point for a '/radio channel scan[...]' argument. Looks up
+    whichever source is currently active, confirms it actually supports the
+    "scan_range" action, and only then parses the argument/runs the scan --
+    a source that doesn't support scanning gets a clear message instead of
+    bot.py silently assuming RTL-SDR hardware is present."""
+    current_source_type = get_current_source_type()
+    modules = load_source_modules()
+    active_module = modules.get(current_source_type)
 
-def find_peaks_in_step(center_hz: float, sample_rate: int, complex_samples):
-    """Runs a windowed FFT over one capture window and returns candidate
-    (freq_hz, power_db) peaks that clear the step's own noise floor."""
-    if len(complex_samples) < SCAN_FFT_SIZE:
-        return []
+    supported_actions = getattr(active_module, "SUPPORTED_ACTIONS", []) if active_module else []
+    scan_fn = getattr(active_module, "scan_range", None) if active_module else None
+    if "scan_range" not in supported_actions or not callable(scan_fn):
+        active_description = getattr(active_module, "DESCRIPTION", current_source_type)
+        await interaction.response.send_message(
+            f"❌ The active source (**{active_description}**) doesn't support frequency scanning. "
+            f"Switch to an SDR source with `/radio input` first.",
+            ephemeral=True
+        )
+        return
 
-    window = np.hanning(SCAN_FFT_SIZE)
-    windowed = complex_samples[:SCAN_FFT_SIZE] * window
-    spectrum = np.fft.fftshift(np.fft.fft(windowed, n=SCAN_FFT_SIZE))
-    power_db = 20.0 * np.log10(np.abs(spectrum) + 1e-12)
-    freq_offsets = np.fft.fftshift(np.fft.fftfreq(SCAN_FFT_SIZE, d=1.0 / sample_rate))
-    freq_bins = freq_offsets + center_hz
+    try:
+        scan_range_hz = parse_scan_range(
+            frequency_arg,
+            default_start_mhz=getattr(active_module, "SCAN_DEFAULT_START_MHZ", 88.0),
+            default_end_mhz=getattr(active_module, "SCAN_DEFAULT_END_MHZ", 108.0),
+            max_span_mhz=getattr(active_module, "SCAN_MAX_SPAN_MHZ", 60.0),
+        )
+    except ValueError as e:
+        await interaction.response.send_message(f"⚠️ {e}", ephemeral=True)
+        return
 
-    noise_floor_db = float(np.median(power_db))
-    threshold = noise_floor_db + SCAN_PEAK_THRESHOLD_DB
+    await execute_channel_scan(interaction, scan_range_hz, scan_fn, active_description=getattr(active_module, "DESCRIPTION", current_source_type))
 
-    # The exact center frequency carries a DC spike that's a dongle artifact, not
-    # a real signal, and would otherwise register as a "channel" on every single
-    # step regardless of what's actually tuned in. Exclude a small guard band
-    # around it.
-    dc_bin = SCAN_FFT_SIZE // 2
-    dc_guard_bins = 3
 
-    above = np.where(power_db > threshold)[0]
-    if len(above) == 0:
-        return []
-
-    # Group contiguous bin runs into single peaks (a real signal typically lights
-    # up several adjacent bins), keep only the strongest bin per run.
-    peaks = []
-    run_start = above[0]
-    prev = above[0]
-    for b in list(above[1:]) + [None]:
-        if b is not None and b == prev + 1:
-            prev = b
-            continue
-        in_dc_guard = (dc_bin - dc_guard_bins <= run_start) and (prev <= dc_bin + dc_guard_bins)
-        if not in_dc_guard:
-            run = range(run_start, prev + 1)
-            best_idx = max(run, key=lambda i: power_db[i])
-            peaks.append((float(freq_bins[best_idx]), float(power_db[best_idx])))
-        if b is not None:
-            run_start = b
-            prev = b
-    return peaks
-
-def merge_nearby_channels(candidates):
-    """Collapses candidate peaks within SCAN_MIN_CHANNEL_SPACING_HZ of each other
-    (e.g. the same station seen from two overlapping sweep steps) into a single
-    entry, keeping whichever reading was strongest."""
-    if not candidates:
-        return []
-    candidates = sorted(candidates, key=lambda c: c[0])
-    merged = [candidates[0]]
-    for freq_hz, power_db in candidates[1:]:
-        last_freq, last_power = merged[-1]
-        if freq_hz - last_freq <= SCAN_MIN_CHANNEL_SPACING_HZ:
-            if power_db > last_power:
-                merged[-1] = (freq_hz, power_db)
-        else:
-            merged.append((freq_hz, power_db))
-    return merged
-
-def scan_for_clear_channels_sync(start_hz: float, end_hz: float):
-    """Sweeps [start_hz, end_hz) in sample-rate-sized steps, running an FFT over each
-    capture window to build a power spectrum, and returns a sorted list of
-    {"frequency": "94.9M", "power_db": float} channel catalog entries.
-
-    This is the blocking implementation (rtl_sdr subprocess calls plus numpy FFT
-    work) -- callers must run it off the bot's event loop, e.g. via
-    asyncio.to_thread(), or it will stall every other Discord interaction for the
-    duration of the sweep.
-    """
-    step_hz = SCAN_SAMPLE_RATE_HZ * SCAN_STEP_OVERLAP
-    span_hz = end_hz - start_hz
-    num_steps = min(SCAN_MAX_STEPS, max(1, int(span_hz / step_hz) + 1))
-
-    all_candidates = []
-    for step in range(num_steps):
-        center_hz = start_hz + (SCAN_SAMPLE_RATE_HZ / 2.0) + (step * step_hz)
-        if center_hz - (SCAN_SAMPLE_RATE_HZ / 2.0) > end_hz:
-            break
-        try:
-            samples = capture_iq_samples(center_hz, SCAN_SAMPLE_RATE_HZ, SCAN_CAPTURE_SECONDS)
-        except Exception as e:
-            print(f"⚠️ [Scan] Skipping step at {center_hz / 1e6:.3f}MHz, capture failed: {e}")
-            continue
-        all_candidates.extend(find_peaks_in_step(center_hz, SCAN_SAMPLE_RATE_HZ, samples))
-
-    merged = merge_nearby_channels(all_candidates)
-    catalog = []
-    for freq_hz, power_db in merged:
-        if freq_hz < start_hz or freq_hz > end_hz:
-            continue
-        freq_mhz = round(freq_hz / 1_000_000, 1)
-        catalog.append({"frequency": f"{freq_mhz}M", "power_db": round(power_db, 1)})
-
-    catalog.sort(key=lambda c: float(c["frequency"].rstrip("M")))
-    return catalog
-
-async def execute_channel_scan(interaction: discord.Interaction, scan_range):
-    """Command-facing wrapper: validates tooling is present, frees the SDR dongle
-    from any active pipeline, runs the blocking sweep off-thread, and posts the
-    resulting channel catalog back to the channel."""
+async def execute_channel_scan(interaction: discord.Interaction, scan_range, scan_fn, active_description: str):
+    """Command-facing wrapper: frees the hardware from any active pipeline,
+    runs the active source's scan_fn off-thread, and posts the resulting
+    channel catalog back to the channel. Has no idea what kind of hardware
+    scan_fn actually talks to -- that's entirely the active source's
+    business (and, in turn, whatever shared action module it delegates to)."""
     start_hz, end_hz = scan_range
     start_mhz = start_hz / 1_000_000
     end_mhz = end_hz / 1_000_000
 
-    if shutil.which("rtl_sdr") is None:
-        await interaction.response.send_message(
-            "❌ `rtl_sdr` not found on PATH, install the rtl-sdr tools package in the container image to use channel scanning.",
-            ephemeral=True
-        )
-        return
-    if not NUMPY_AVAILABLE:
-        await interaction.response.send_message(
-            "❌ `numpy` is not installed, it's required to run the FFT over captured samples for channel scanning.",
-            ephemeral=True
-        )
-        return
-
     await interaction.response.defer(ephemeral=False)
 
-    # Scanning needs exclusive access to the dongle. If a pipeline is currently
-    # streaming from it, free it first rather than letting rtl_sdr fail to claim
-    # the USB interface partway through the sweep.
+    # Scanning needs exclusive access to the hardware. If a pipeline is
+    # currently streaming from it, free it first rather than letting the
+    # scan fail to claim the device partway through.
     was_streaming = bot.hardware_process is not None
     if was_streaming:
         stop_active_hardware_process()
-        await interaction.followup.send("⏸️ Pausing the active pipeline to free the SDR dongle for scanning...")
+        await interaction.followup.send(f"⏸️ Pausing the active pipeline to free {active_description} for scanning...")
 
     await interaction.followup.send(
         f"🔎 Scanning **{start_mhz:.1f}MHz - {end_mhz:.1f}MHz** for clear channels "
-        f"(FFT size {SCAN_FFT_SIZE}, this can take a little while)..."
+        f"(this can take a little while)..."
     )
 
     try:
-        catalog = await asyncio.to_thread(scan_for_clear_channels_sync, start_hz, end_hz)
+        catalog = await asyncio.to_thread(scan_fn, start_hz, end_hz)
     except Exception as e:
         await interaction.followup.send(f"❌ Scan failed: {e}")
         return
