@@ -4,6 +4,8 @@ RTL-SDR Radio (FM & HAM) source.
 Self-contained audio source plugin -- see the "SOURCE PLUGIN CONTRACT"
 docstring in bot.py for the interface this file implements (SOURCE_TYPE,
 DESCRIPTION, discover(), build_command(), and the optional probe_signal()).
+Also advertises the optional "scan_range" action (SUPPORTED_ACTIONS +
+scan_range()) via actions/scan_range.py.
 
 Detects an RTL2832U-based USB dongle via `lsusb` and demodulates wideband
 FM at the currently tuned frequency using `rtl_fm`, piping straight into
@@ -15,6 +17,8 @@ dongle is plugged in, only this source fails to discover anything.
 import os
 import subprocess
 
+from actions import scan_range as scan_range_action
+
 SOURCE_TYPE = "sdr_radio"
 DESCRIPTION = "Radio (FM & HAM)"
 
@@ -24,6 +28,23 @@ DESCRIPTION = "Radio (FM & HAM)"
 # installs these, and only if they're already on the admin-maintained
 # allowlist.
 REQUIRED_PACKAGES = ["usbutils", "rtl-sdr", "ffmpeg"]
+
+# Optional capabilities this source exposes beyond the base discover()/
+# build_command() contract, e.g. bot.py's `/radio channel scan` only offers
+# itself for the currently active source if "scan_range" is listed here --
+# see the "SOURCE PLUGIN CONTRACT" note in bot.py.
+SUPPORTED_ACTIONS = ["scan_range"]
+
+# FM-broadcast-specific policy for the scan_range action below -- these are
+# opinions about *this band*, not RTL-SDR hardware facts, so they live here
+# rather than in actions/scan_range.py (which stays band-agnostic). bot.py
+# reads SCAN_DEFAULT_START_MHZ/SCAN_DEFAULT_END_MHZ/SCAN_MAX_SPAN_MHZ off
+# the active source module when parsing a bare "scan" argument with no
+# explicit range.
+SCAN_DEFAULT_START_MHZ = 88.0
+SCAN_DEFAULT_END_MHZ = 108.0
+SCAN_MAX_SPAN_MHZ = 60.0                # sanity cap so a mistyped range can't trigger a runaway scan
+SCAN_MIN_CHANNEL_SPACING_HZ = 200_000   # standard FM broadcast channel spacing
 
 # RTL2832U-based dongles report this vendor:product USB ID.
 USB_VENDOR_ID = "0bda"
@@ -89,3 +110,14 @@ def build_command(instance: dict, frequency: str, fifo_pipe: str) -> str:
 # No probe_signal() -- there's exactly one dongle-backed instance here (not
 # several indistinguishable ones like the USB mic case), so there's nothing
 # to disambiguate with a live-signal probe.
+
+
+def scan_range(start_hz: float, end_hz: float) -> list:
+    """The "scan_range" action advertised in SUPPORTED_ACTIONS above.
+    Sweeps [start_hz, end_hz) for clear FM broadcast channels, delegating
+    the actual RTL-SDR capture/FFT mechanics to the shared action and only
+    supplying this band's own channel-spacing policy."""
+    return scan_range_action.scan_for_clear_channels_sync(
+        start_hz, end_hz,
+        min_channel_spacing_hz=SCAN_MIN_CHANNEL_SPACING_HZ,
+    )
