@@ -164,15 +164,49 @@ class TestExecuteStreamPipelineFull:
              patch("bot.SOURCES_CACHE_FILE", cache_file), \
              patch.object(bot, "spawn_hardware_capture_stream") as mock_spawn, \
              patch.object(bot, "save_stream_state") as mock_save, \
-             patch("bot.discord.FFmpegPCMAudio", return_value=MagicMock()), \
+             patch("bot.discord.PCMAudio", return_value=MagicMock()), \
              patch("bot.discord.PCMVolumeTransformer", return_value=MagicMock()), \
-             patch("bot.asyncio.sleep", new=AsyncMock()):
+             patch.object(bot, "wait_for_pipeline_ready", new=AsyncMock(return_value=True)):
             run(bot.execute_stream_pipeline(interaction, fake_channel))
 
         mock_spawn.assert_called_once()
         mock_save.assert_called_once()
         interaction.followup.send.assert_called_once()
         assert "Connected" in str(interaction.followup.send.call_args)
+
+    def test_new_source_closes_old_fifo_reader_and_tracks_new_one(self, tmp_path):
+        """Confirms execute_stream_pipeline() calls close_fifo_reader() before opening a
+        new handle, and tracks the new handle on bot.fifo_reader -- the actual behavior
+        the close_fifo_reader() fix depends on to prevent two readers ever being attached
+        to the FIFO at once during a restart."""
+        cache_file = str(tmp_path / "cache.json")
+        state_file = str(tmp_path / "state.json")
+        with open(cache_file, 'w') as f:
+            json.dump([{"type": "test_signal", "device": "virtual", "description": "Test"}], f)
+
+        interaction = MagicMock()
+        interaction.followup.send = AsyncMock()
+        interaction.guild.id = 42
+        fake_channel = MagicMock()
+        fake_channel.id = 99
+        fake_channel.connect = AsyncMock(return_value=MagicMock(is_playing=MagicMock(return_value=False)))
+        interaction.guild.voice_client = None
+
+        with patch("bot.STATE_FILE", state_file), \
+             patch("bot.SOURCES_CACHE_FILE", cache_file), \
+             patch.object(bot, "spawn_hardware_capture_stream"), \
+             patch.object(bot, "save_stream_state"), \
+             patch.object(bot, "close_fifo_reader") as mock_close, \
+             patch("bot.discord.PCMAudio", return_value=MagicMock()), \
+             patch("bot.discord.PCMVolumeTransformer", return_value=MagicMock()), \
+             patch.object(bot, "wait_for_pipeline_ready", new=AsyncMock(return_value=True)):
+            run(bot.execute_stream_pipeline(interaction, fake_channel))
+
+        mock_close.assert_called_once()
+        assert bot.bot.fifo_reader is not None
+        assert not bot.bot.fifo_reader.closed
+        bot.bot.fifo_reader.close()  # test cleanup -- this handle is real, opened against FIFO_PIPE
+        bot.bot.fifo_reader = None
 
     def test_reuses_existing_voice_client_already_playing(self, tmp_path):
         cache_file = str(tmp_path / "cache.json")
@@ -193,12 +227,12 @@ class TestExecuteStreamPipelineFull:
              patch("bot.SOURCES_CACHE_FILE", cache_file), \
              patch.object(bot, "spawn_hardware_capture_stream"), \
              patch.object(bot, "save_stream_state"), \
-             patch("bot.discord.FFmpegPCMAudio") as mock_ffmpeg, \
-             patch("bot.asyncio.sleep", new=AsyncMock()):
+             patch("bot.discord.PCMAudio") as mock_pcm_audio, \
+             patch.object(bot, "wait_for_pipeline_ready", new=AsyncMock(return_value=True)):
             run(bot.execute_stream_pipeline(interaction, fake_channel))
 
-        # Already playing -> should NOT spawn a new FFmpegPCMAudio source.
-        mock_ffmpeg.assert_not_called()
+        # Already playing -> should NOT spawn a new PCMAudio source.
+        mock_pcm_audio.assert_not_called()
 
     def test_reads_state_file_for_source(self, tmp_path):
         cache_file = str(tmp_path / "cache.json")
@@ -225,9 +259,9 @@ class TestExecuteStreamPipelineFull:
              patch("bot.SOURCES_CACHE_FILE", cache_file), \
              patch.object(bot, "spawn_hardware_capture_stream") as mock_spawn, \
              patch.object(bot, "save_stream_state"), \
-             patch("bot.discord.FFmpegPCMAudio", return_value=MagicMock()), \
+             patch("bot.discord.PCMAudio", return_value=MagicMock()), \
              patch("bot.discord.PCMVolumeTransformer", return_value=MagicMock()), \
-             patch("bot.asyncio.sleep", new=AsyncMock()):
+             patch.object(bot, "wait_for_pipeline_ready", new=AsyncMock(return_value=True)):
             run(bot.execute_stream_pipeline(interaction, fake_channel))
 
         active_source = mock_spawn.call_args[0][0]
@@ -254,9 +288,9 @@ class TestExecuteStreamPipelineFull:
              patch("bot.SOURCES_CACHE_FILE", cache_file), \
              patch.object(bot, "spawn_hardware_capture_stream"), \
              patch.object(bot, "save_stream_state"), \
-             patch("bot.discord.FFmpegPCMAudio", return_value=MagicMock()), \
+             patch("bot.discord.PCMAudio", return_value=MagicMock()), \
              patch("bot.discord.PCMVolumeTransformer", return_value=MagicMock()), \
-             patch("bot.asyncio.sleep", new=AsyncMock()):
+             patch.object(bot, "wait_for_pipeline_ready", new=AsyncMock(return_value=True)):
             run(bot.execute_stream_pipeline(interaction, fake_channel))
 
         interaction.followup.send.assert_called_once()
@@ -283,9 +317,9 @@ class TestExecuteStreamPipelineFull:
              patch("bot.SOURCES_CACHE_FILE", cache_file), \
              patch.object(bot, "spawn_hardware_capture_stream") as mock_spawn, \
              patch.object(bot, "save_stream_state"), \
-             patch("bot.discord.FFmpegPCMAudio", return_value=MagicMock()), \
+             patch("bot.discord.PCMAudio", return_value=MagicMock()), \
              patch("bot.discord.PCMVolumeTransformer", return_value=MagicMock()), \
-             patch("bot.asyncio.sleep", new=AsyncMock()):
+             patch.object(bot, "wait_for_pipeline_ready", new=AsyncMock(return_value=True)):
             run(bot.execute_stream_pipeline(
                 interaction, fake_channel,
                 force_source_type="usb_mic", force_device="plughw:1,0",
@@ -316,9 +350,9 @@ class TestExecuteStreamPipelineFull:
              patch.object(bot, "discover_hardware_profile", side_effect=fake_discover) as mock_discover, \
              patch.object(bot, "spawn_hardware_capture_stream"), \
              patch.object(bot, "save_stream_state"), \
-             patch("bot.discord.FFmpegPCMAudio", return_value=MagicMock()), \
+             patch("bot.discord.PCMAudio", return_value=MagicMock()), \
              patch("bot.discord.PCMVolumeTransformer", return_value=MagicMock()), \
-             patch("bot.asyncio.sleep", new=AsyncMock()):
+             patch.object(bot, "wait_for_pipeline_ready", new=AsyncMock(return_value=True)):
             run(bot.execute_stream_pipeline(interaction, fake_channel))
 
         mock_discover.assert_called_once()
@@ -1381,6 +1415,41 @@ class TestLoadPackageAllowlistExceptionBranch:
         captured = capsys.readouterr()
         assert "Failed to seed package allowlist" in captured.out
         assert "ffmpeg" in allowlist
+
+
+class TestCloseFifoReader:
+    """close_fifo_reader() -- added alongside the fix that made execute_stream_pipeline()
+    close the previous FIFO read handle deterministically instead of relying on GC to
+    eventually drop it once the old AudioPlayer thread finishes tearing down. Not just an
+    fd-leak concern: without this, a /radio restart could briefly leave two readers attached
+    to the same FIFO at once, and POSIX doesn't guarantee which reader gets which bytes when
+    there's more than one."""
+
+    def test_noop_when_nothing_open(self):
+        with patch.object(bot.bot, "fifo_reader", None):
+            bot.close_fifo_reader()  # should not raise
+            assert bot.bot.fifo_reader is None
+
+    def test_closes_and_clears_open_handle(self):
+        mock_handle = MagicMock()
+        with patch.object(bot.bot, "fifo_reader", mock_handle):
+            bot.close_fifo_reader()
+        mock_handle.close.assert_called_once()
+        assert bot.bot.fifo_reader is None
+
+    def test_close_raising_is_swallowed(self):
+        mock_handle = MagicMock()
+        mock_handle.close.side_effect = OSError("already closed")
+        with patch.object(bot.bot, "fifo_reader", mock_handle):
+            bot.close_fifo_reader()  # should not raise
+        assert bot.bot.fifo_reader is None
+
+    def test_double_close_is_safe(self):
+        mock_handle = MagicMock()
+        with patch.object(bot.bot, "fifo_reader", mock_handle):
+            bot.close_fifo_reader()
+            bot.close_fifo_reader()  # second call: fifo_reader is already None
+        mock_handle.close.assert_called_once()
 
 
 class TestStopActiveHardwareProcessMore:
