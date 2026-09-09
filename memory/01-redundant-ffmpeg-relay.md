@@ -47,3 +47,52 @@ reasoning as above.
 garbage collection. Probably fine (the FIFO has a permanent writer so
 nothing depends on prompt closure) but wasn't deliberately decided either
 way. Worth a look if picking this area back up.
+
+---
+
+## UPDATE — fixed
+
+**status: DONE (fixed this session)**
+
+Traced this further than "probably fine" and found a real correctness
+issue, not just a leak: `vc.stop()` only *signals* the old `AudioPlayer`
+thread to end and returns immediately — the thread's actual teardown (the
+point where its last reference to the old `PCMAudio`/file object drops)
+happens asynchronously. `/radio restart` calls `stop_active_hardware_process()`
++ `vc.stop()` then immediately calls `execute_stream_pipeline()` again,
+which used to open a brand-new `open(FIFO_PIPE, "rb")` with no coordination
+with the old one. That leaves a real window where two readers can be
+attached to the same FIFO at once — and POSIX doesn't guarantee which
+reader gets which bytes when there's more than one, so audio could get
+split between the old (dying) and new reader during a restart.
+
+Fixed with a new `close_fifo_reader()` helper (next to
+`stop_active_hardware_process()`) that synchronously closes and clears
+`bot.fifo_reader`. Called in two places:
+- `execute_stream_pipeline()`, immediately before opening a new
+  `fifo_reader`, inside the `if not vc.is_playing():` block.
+- `stop()` command handler, alongside `stop_active_hardware_process()`,
+  for full cleanup on disconnect.
+
+`bot.fifo_reader` (new attribute, initialized `None` in
+`StreamBotClient.__init__` alongside `hardware_process`/`sox_process`/
+`ffmpeg_process`) tracks the currently-open handle so it can be found and
+closed deterministically instead of waiting on GC.
+
+Verified directly (not via the existing pytest suite, which wasn't
+targeted this round): opened a real handle on an actual FIFO, confirmed
+`close_fifo_reader()` actually closes it and resets the tracking attribute
+to `None`, and confirmed calling it with nothing open (or twice in a row)
+is a safe no-op. `python3 -m py_compile bot.py` passes.
+
+**Not covered by this fix, still open:** no dedicated pytest coverage was
+added for `close_fifo_reader()` itself or for the two call sites — this
+ties into the broader "test coverage hasn't caught up with recent changes"
+item already listed in `README.md`'s suggested next steps. Also noticed
+in passing (unrelated to this fix, pre-existing, did not investigate):
+`TestStopActiveHardwareProcessMore::test_second_wait_succeeds_after_sigterm_timeout`
+and `::test_final_kill_also_raises_is_swallowed` fail on this checkout —
+confirmed `stop_active_hardware_process()` itself is byte-for-byte
+unchanged by this fix, so these are pre-existing failures, not a
+regression from this change, but worth someone's attention.
+
