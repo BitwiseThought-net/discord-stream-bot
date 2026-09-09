@@ -44,26 +44,9 @@ reasonable next candidates (not yet analyzed in depth):
   actually exercises these current implementations rather than the
   pre-fix versions (this project has previously had stale-test issues
   after refactors — see git history / conversation context if available).
-  This now also covers `close_fifo_reader()` (see item 1 update below) --
-  no dedicated test exists for it yet either.
+- `fifo_reader = open(FIFO_PIPE, "rb")` in `execute_stream_pipeline()` is
+  never explicitly closed on stop/cleanup (relies on GC). Likely harmless
+  given the FIFO has a permanent writer, but worth a deliberate look.
 - Parallelize the sequential per-package `dpkg -s` checks in `check_deps()`
   (each is already correctly wrapped in `asyncio.to_thread` individually,
   so this is a minor throughput improvement, not a responsiveness bug).
-
-## Follow-up fix landed this session
-
-**Item 1's file was updated in place** — `fifo_reader` is now explicitly,
-deterministically closed via a new `close_fifo_reader()` helper, instead
-of relying on GC. This turned out to matter more than a plain fd leak: see
-the "UPDATE — fixed" section in `01-redundant-ffmpeg-relay.md` for the
-actual race it closes (two readers briefly attached to the same FIFO
-during `/radio restart`).
-
-**Noticed but NOT fixed, needs attention:** two pre-existing test failures
-unrelated to this session's change --
-`TestStopActiveHardwareProcessMore::test_second_wait_succeeds_after_sigterm_timeout`
-and `::test_final_kill_also_raises_is_swallowed` in `tests/test_bot_commands.py`.
-Confirmed `stop_active_hardware_process()` itself is untouched by this
-session's edits, so these aren't a regression from `close_fifo_reader()` --
-just flagging since they were surfaced while sanity-checking this fix.
-
