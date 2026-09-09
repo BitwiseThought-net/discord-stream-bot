@@ -7,6 +7,7 @@ import signal
 import shutil
 import subprocess
 import importlib.util
+import select
 import uuid
 from typing import Optional
 from datetime import datetime, timedelta
@@ -144,6 +145,7 @@ class StreamBotClient(discord.Client):
         self.hardware_process = None
         self.sox_process = None
         self.ffmpeg_process = None
+        self.fifo_reader = None  # currently-open read handle on FIFO_PIPE, see close_fifo_reader()
 
     async def setup_hook(self):
         self.tree.add_command(radio_group)
@@ -270,7 +272,7 @@ def load_source_modules():
     return modules
 
 
-def discover_hardware_profile():
+def discover_hardware_profile(modules=None):
     """Asks every loaded source module what's currently available and
     flattens the results into a single catalog list, caching it to disk for
     the other commands that resolve against it.
@@ -278,9 +280,15 @@ def discover_hardware_profile():
     Each source module is only ever asked about itself -- a module raising
     from discover() only removes that one source from the catalog for this
     scan; it can't take down discovery for any other source.
+
+    Accepts an already-loaded `modules` dict (source_type -> module) so
+    callers that also need it for something else in the same operation
+    (e.g. scan_sources_for_signal() right after this) don't force a second
+    full reload-from-disk of every source file. Loads its own if omitted.
     """
     available_sources = []
-    modules = load_source_modules()
+    if modules is None:
+        modules = load_source_modules()
 
     for source_type, module in modules.items():
         try:
@@ -497,6 +505,34 @@ def ensure_source_dependencies_installed(modules=None):
 # =========================================================================
 # 4. BROADCAST CORE PIPELINE HANDLERS
 # =========================================================================
+def close_fifo_reader():
+    """Explicitly, synchronously closes the current FIFO read handle (if any).
+
+    discord.PCMAudio doesn't close the stream you hand it on cleanup() --
+    reasonably, since callers might want to reuse/manage it themselves -- so
+    without this, the old file handle only goes away once CPython's
+    refcounting GC gets around to collecting the torn-down AudioPlayer
+    thread and its whole source chain (PCMVolumeTransformer -> PCMAudio ->
+    file object). That's not just an eventual-fd-leak risk: vc.stop() only
+    *signals* the AudioPlayer thread to end (self._end.set()) and returns
+    immediately -- the thread's own teardown (which is what would drop that
+    last reference) happens asynchronously in the background. If
+    execute_stream_pipeline() immediately opens a *new* reader and calls
+    vc.play() again (exactly what /radio restart does), there's a real
+    window where two readers are attached to the same FIFO at once, and
+    POSIX doesn't guarantee a FIFO's bytes go to any particular reader when
+    there's more than one -- audio could get split between the old and new
+    reader instead of the new one getting a clean stream. Closing the old
+    handle deterministically, synchronously, before opening a new one closes
+    that window entirely.
+    """
+    if bot.fifo_reader is not None:
+        try:
+            bot.fifo_reader.close()
+        except Exception:
+            pass
+        bot.fifo_reader = None
+
 def stop_active_hardware_process():
     """Explicitly terminates all running hardware pipeline process layers completely.
 
@@ -599,6 +635,27 @@ def resolve_active_source(detected_sources, target_source_type, target_device=No
         active_source = detected_sources[0] if detected_sources else dict(BUILTIN_FALLBACK_SOURCE)
     return active_source
 
+async def wait_for_pipeline_ready(timeout: float = 0.4) -> bool:
+    """Waits for the freshly spawned capture pipeline to have its first bytes
+    sitting in the FIFO, instead of blindly sleeping a fixed duration
+    regardless of how fast (or slow) that particular source actually is to
+    start producing audio. Returns as soon as data is available, or after
+    `timeout` seconds if the pipeline is still slow to start -- playback
+    will pick up audio whenever it actually arrives either way, so this is
+    a latency optimization, not a correctness gate.
+
+    Checks GLOBAL_FIFO_FD (the permanently-open keep-alive descriptor) via
+    select() rather than opening a new fd -- select() only asks the kernel
+    "is there unconsumed data queued", it never reads/consumes any bytes
+    itself, so this doesn't race with or steal data from the real reader
+    that vc.play() attaches moments later.
+    """
+    try:
+        readable, _, _ = await asyncio.to_thread(select.select, [GLOBAL_FIFO_FD], [], [], timeout)
+        return bool(readable)
+    except Exception:
+        return False
+
 async def execute_stream_pipeline(interaction: discord.Interaction, channel: discord.VoiceChannel,
                                    force_source_type: str = None, force_device: str = None):
     """Binds the voice client loop to our continuous filesystem FIFO stream handle, using string keys."""
@@ -625,7 +682,7 @@ async def execute_stream_pipeline(interaction: discord.Interaction, channel: dis
         target_device = force_device
 
     if not os.path.exists(SOURCES_CACHE_FILE):
-        discover_hardware_profile()
+        await asyncio.to_thread(discover_hardware_profile)
 
     try:
         with open(SOURCES_CACHE_FILE, 'r') as f:
@@ -640,14 +697,32 @@ async def execute_stream_pipeline(interaction: discord.Interaction, channel: dis
         vc = interaction.guild.voice_client or await channel.connect()
 
         spawn_hardware_capture_stream(active_source)
-        await asyncio.sleep(0.4)
+        await wait_for_pipeline_ready(timeout=0.4)
 
         if not vc.is_playing():
-            audio_stream = discord.FFmpegPCMAudio(
-                source=FIFO_PIPE,
-                before_options="-f s16le -ar 48k -ac 2",
-                pipe=False
-            )
+            # Every source's build_command() already writes raw s16le/48kHz/
+            # stereo PCM into FIFO_PIPE (that's the plugin contract) -- so
+            # there's no format conversion left to do here at all. Reading
+            # it with discord.PCMAudio (a plain buffered file read) lets
+            # discord.py's own libopus bindings encode it directly, instead
+            # of spawning a second ffmpeg process whose only job would be
+            # relaying identical-format PCM back out unchanged. A plain
+            # open(..., "rb") is a BufferedReader, whose .read(n) blocks
+            # until it actually has n bytes (or hits real EOF) rather than
+            # returning short reads -- and real EOF never happens here since
+            # PIPE_WRITE_HANDLE keeps a permanent writer on the FIFO.
+            #
+            # close_fifo_reader() first: vc.stop() (e.g. from /radio restart)
+            # only signals the old AudioPlayer thread to end and returns
+            # immediately, it doesn't wait for that thread to actually tear
+            # down and drop its reference to the old reader. Without an
+            # explicit close here, both the old and new reader could briefly
+            # be attached to the FIFO at once, and POSIX doesn't guarantee
+            # which reader gets which bytes when more than one is attached.
+            close_fifo_reader()
+            fifo_reader = open(FIFO_PIPE, "rb")
+            bot.fifo_reader = fifo_reader
+            audio_stream = discord.PCMAudio(fifo_reader)
             transformer = discord.PCMVolumeTransformer(audio_stream, volume=CURRENT_VOLUME_LEVEL)
             vc.play(transformer)
 
@@ -678,6 +753,7 @@ async def stop(interaction: discord.Interaction):
         del bot.sleep_tasks[guild_id]
 
     stop_active_hardware_process()
+    close_fifo_reader()
     clear_stream_state()
 
     await vc.disconnect()
@@ -739,14 +815,24 @@ async def volume(interaction: discord.Interaction, percentage: int):
 # =========================================================================
 # 5. DEVICE CATALOG SELECTION & DYNAMIC TUNING COMMANDS
 # =========================================================================
+def _scan_and_probe_sources_sync():
+    """Blocking helper: loads source modules exactly once, then runs both
+    discovery and live-signal probing against that same load. Wrapped in a
+    single asyncio.to_thread() call by callers so neither the (re)import of
+    every sources/*.py file nor the per-card arecord probes ever block the
+    event loop."""
+    modules = load_source_modules()
+    sources = discover_hardware_profile(modules=modules)
+    signal_map = scan_sources_for_signal(sources, modules=modules)
+    return sources, signal_map
+
 @radio_group.command(name="input", description="List available sources (no index), or switch the active capture interface by catalog index")
 @app_commands.describe(index="Catalog index to switch to. Omit this to re-scan and list all available sources instead.")
 async def set_input(interaction: discord.Interaction, index: Optional[int] = None):
     if index is None:
         # ---- LIST MODE: re-scan hardware and display the catalog (formerly /radio list) ----
         await interaction.response.defer(ephemeral=False)
-        sources = discover_hardware_profile()
-        signal_map = scan_sources_for_signal(sources)
+        sources, signal_map = await asyncio.to_thread(_scan_and_probe_sources_sync)
 
         response = "📡 **Available Hardware Capture Interfaces:**\n"
         visible_count = 0
@@ -835,24 +921,20 @@ async def check_deps(interaction: discord.Interaction):
 
     await interaction.followup.send("📦 **Dependency check complete:**\n" + "\n".join(lines))
 
-@radio_group.command(name="auto", description="Auto-detect and connect to whichever USB microphone is receiving live signal")
-async def auto_input(interaction: discord.Interaction):
-    if not interaction.user.voice or not interaction.user.voice.channel:
-        await interaction.response.send_message("You must be in a voice channel to auto-detect and start streaming!", ephemeral=True)
-        return
-
-    await interaction.response.defer(ephemeral=False)
-
-    sources = discover_hardware_profile()
+def _discover_probeable_sources_sync():
+    """Blocking helper for auto_input(): one load_source_modules() call
+    shared by both discovery and the probeable-sources filter below, instead
+    of discover_hardware_profile() and this function each loading every
+    source file from disk separately."""
     modules = load_source_modules()
+    sources = discover_hardware_profile(modules=modules)
     probeable_sources = [s for s in sources if callable(getattr(modules.get(s.get("type")), "probe_signal", None))]
+    return modules, probeable_sources
 
-    if not probeable_sources:
-        await interaction.followup.send("⚠️ No probeable input interfaces detected to scan.")
-        return
-
-    await interaction.followup.send(f"🔎 Probing {len(probeable_sources)} interface(s) for live signal...")
-
+def _find_live_source_sync(probeable_sources, modules):
+    """Blocking helper for auto_input(): runs probe_signal() against each
+    candidate in turn (stopping at the first live one) off the event loop --
+    each probe is itself a blocking subprocess call (e.g. arecord)."""
     live_source = None
     probe_errors = []
     for src in probeable_sources:
@@ -865,6 +947,25 @@ async def auto_input(interaction: discord.Interaction):
             break
         if status == "error":
             probe_errors.append(f"{src['device']}: {detail}")
+    return live_source, probe_errors
+
+@radio_group.command(name="auto", description="Auto-detect and connect to whichever USB microphone is receiving live signal")
+async def auto_input(interaction: discord.Interaction):
+    if not interaction.user.voice or not interaction.user.voice.channel:
+        await interaction.response.send_message("You must be in a voice channel to auto-detect and start streaming!", ephemeral=True)
+        return
+
+    await interaction.response.defer(ephemeral=False)
+
+    modules, probeable_sources = await asyncio.to_thread(_discover_probeable_sources_sync)
+
+    if not probeable_sources:
+        await interaction.followup.send("⚠️ No probeable input interfaces detected to scan.")
+        return
+
+    await interaction.followup.send(f"🔎 Probing {len(probeable_sources)} interface(s) for live signal...")
+
+    live_source, probe_errors = await asyncio.to_thread(_find_live_source_sync, probeable_sources, modules)
 
     if live_source is None:
         msg = "⚪ No live signal detected on any USB microphone. Leaving current source unchanged."
