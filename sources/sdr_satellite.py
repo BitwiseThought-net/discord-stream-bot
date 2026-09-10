@@ -7,10 +7,10 @@ DESCRIPTION, discover(), build_command(), and the optional probe_signal()).
 
 Detects an RTL2832U-based USB dongle via `lsusb` and demodulates narrowband
 FM (as used by NOAA APT weather satellite downlinks) at the currently tuned
-frequency with `rtl_fm`, resampling through `sox` and `ffmpeg` into the
-shared FIFO. All rtl_fm/USB-chipset-specific logic lives in this one file --
-if `lsusb`/`rtl_fm`/`sox` are missing or no dongle is plugged in, only this
-source fails to discover anything.
+frequency with `rtl_fm`, resampling and upmixing to stereo through `sox`
+into the shared FIFO. All rtl_fm/USB-chipset-specific logic lives in this
+one file -- if `lsusb`/`rtl_fm`/`sox` are missing or no dongle is plugged
+in, only this source fails to discover anything.
 """
 
 import os
@@ -20,11 +20,11 @@ SOURCE_TYPE = "sdr_satellite"
 DESCRIPTION = "Weather Satellite Data"
 
 # Debian/apt package names this file shells out to: usbutils for lsusb,
-# rtl-sdr for rtl_fm, sox/libsox-fmt-all for resampling, ffmpeg for the
-# final stage. Purely declarative -- see the SOURCE PLUGIN CONTRACT note in
-# bot.py. bot.py is the only thing that ever installs these, and only if
-# they're already on the admin-maintained allowlist.
-REQUIRED_PACKAGES = ["usbutils", "rtl-sdr", "sox", "libsox-fmt-all", "ffmpeg"]
+# rtl-sdr for rtl_fm, sox/libsox-fmt-all for resampling and the
+# mono-to-stereo upmix. Purely declarative -- see the SOURCE PLUGIN
+# CONTRACT note in bot.py. bot.py is the only thing that ever installs
+# these, and only if they're already on the admin-maintained allowlist.
+REQUIRED_PACKAGES = ["usbutils", "rtl-sdr", "sox", "libsox-fmt-all"]
 
 # RTL2832U-based dongles report this vendor:product USB ID.
 USB_VENDOR_ID = "0bda"
@@ -81,10 +81,17 @@ def discover():
 
 
 def build_command(instance: dict, frequency: str, fifo_pipe: str) -> str:
+    # sox does the 32k->48k resample AND the mono->stereo upmix (`remix 1 1`
+    # duplicates input channel 1 into both output channels) in one pass, so
+    # the trailing ffmpeg stage that used to exist here purely to duplicate
+    # an already-correct-rate mono stream into stereo has been dropped --
+    # it was a pure passthrough hop, same class of waste as the
+    # Discord-facing one documented in memory/01-redundant-ffmpeg-relay.md.
+    # See memory/03-sdr-pipeline-extra-ffmpeg-hop.md.
     return (
         f"rtl_fm -f {frequency} -M fm -s 40k -r 32k -g 45 | "
-        "sox -t raw -r 32k -e signed-integer -b 16 -c 1 - -t raw -r 48k - | "
-        f"ffmpeg -y -f s16le -ar 48k -ac 1 -i pipe:0 -f s16le -ar 48k -ac 2 pipe:1 >> {fifo_pipe}"
+        "sox -t raw -r 32k -e signed-integer -b 16 -c 1 - "
+        f"-t raw -r 48k -e signed-integer -b 16 -c 2 - remix 1 1 >> {fifo_pipe}"
     )
 
 

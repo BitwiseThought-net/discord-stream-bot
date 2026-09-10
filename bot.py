@@ -696,7 +696,13 @@ async def execute_stream_pipeline(interaction: discord.Interaction, channel: dis
     try:
         vc = interaction.guild.voice_client or await channel.connect()
 
-        spawn_hardware_capture_stream(active_source)
+        # spawn_hardware_capture_stream() calls stop_active_hardware_process()
+        # internally, which can block for up to ~2s (SIGTERM wait, then
+        # SIGKILL wait) per already-running process it has to tear down.
+        # Run the whole thing off the event loop so a slow teardown doesn't
+        # stall the Discord gateway heartbeat / every other guild's commands
+        # for that long -- see memory/02-blocking-subprocess-calls-in-event-loop.md.
+        await asyncio.to_thread(spawn_hardware_capture_stream, active_source)
         await wait_for_pipeline_ready(timeout=0.4)
 
         if not vc.is_playing():
@@ -752,7 +758,9 @@ async def stop(interaction: discord.Interaction):
         bot.sleep_tasks[guild_id].cancel()
         del bot.sleep_tasks[guild_id]
 
-    stop_active_hardware_process()
+    # See memory/02-blocking-subprocess-calls-in-event-loop.md -- this can
+    # block for up to ~2s tearing down processes; run it off the event loop.
+    await asyncio.to_thread(stop_active_hardware_process)
     close_fifo_reader()
     clear_stream_state()
 
@@ -772,7 +780,9 @@ async def restart(interaction: discord.Interaction):
     # children via killpg -- see stop_active_hardware_process) but deliberately
     # leave the voice connection itself alone, so listeners aren't kicked out
     # of the channel for what's meant to be a quick pipeline bounce.
-    stop_active_hardware_process()
+    # See memory/02-blocking-subprocess-calls-in-event-loop.md -- this can
+    # block for up to ~2s tearing down processes; run it off the event loop.
+    await asyncio.to_thread(stop_active_hardware_process)
     if vc.is_playing() or vc.is_paused():
         vc.stop()
 
@@ -1077,7 +1087,11 @@ async def sleep_timer_worker(guild_id: int, delay: int):
     await asyncio.sleep(delay)
     guild = bot.get_guild(guild_id)
     if guild and guild.voice_client:
-        stop_active_hardware_process()
+        # See memory/02-blocking-subprocess-calls-in-event-loop.md -- this
+        # can block for up to ~2s tearing down processes; run it off the
+        # event loop (matters here too: sleep timers fire on a shared
+        # background task, same event loop as everything else).
+        await asyncio.to_thread(stop_active_hardware_process)
         clear_stream_state()
         await guild.voice_client.disconnect()
     if guild_id in bot.sleep_tasks:
@@ -1324,7 +1338,10 @@ async def execute_channel_scan(interaction: discord.Interaction, scan_range, sca
     # scan fail to claim the device partway through.
     was_streaming = bot.hardware_process is not None
     if was_streaming:
-        stop_active_hardware_process()
+        # See memory/02-blocking-subprocess-calls-in-event-loop.md -- this
+        # can block for up to ~2s tearing down processes; run it off the
+        # event loop.
+        await asyncio.to_thread(stop_active_hardware_process)
         await interaction.followup.send(f"⏸️ Pausing the active pipeline to free {active_description} for scanning...")
 
     await interaction.followup.send(

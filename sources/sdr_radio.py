@@ -9,9 +9,10 @@ scan_range()) via actions/scan_range.py.
 
 Detects an RTL2832U-based USB dongle via `lsusb` and demodulates wideband
 FM at the currently tuned frequency using `rtl_fm`, piping straight into
-ffmpeg for resampling into the shared FIFO. All rtl_fm/USB-chipset-specific
-logic lives in this one file -- if `lsusb`/`rtl_fm` are missing or no
-dongle is plugged in, only this source fails to discover anything.
+sox for the mono-to-stereo upmix into the shared FIFO. All
+rtl_fm/USB-chipset-specific logic lives in this one file -- if
+`lsusb`/`rtl_fm`/`sox` are missing or no dongle is plugged in, only this
+source fails to discover anything.
 """
 
 import os
@@ -23,11 +24,11 @@ SOURCE_TYPE = "sdr_radio"
 DESCRIPTION = "Radio (FM & HAM)"
 
 # Debian/apt package names this file shells out to: usbutils for lsusb,
-# rtl-sdr for rtl_fm, ffmpeg for resampling. Purely declarative -- see the
-# SOURCE PLUGIN CONTRACT note in bot.py. bot.py is the only thing that ever
-# installs these, and only if they're already on the admin-maintained
-# allowlist.
-REQUIRED_PACKAGES = ["usbutils", "rtl-sdr", "ffmpeg"]
+# rtl-sdr for rtl_fm, sox/libsox-fmt-all for the mono-to-stereo upmix.
+# Purely declarative -- see the SOURCE PLUGIN CONTRACT note in bot.py.
+# bot.py is the only thing that ever installs these, and only if they're
+# already on the admin-maintained allowlist.
+REQUIRED_PACKAGES = ["usbutils", "rtl-sdr", "sox", "libsox-fmt-all"]
 
 # Optional capabilities this source exposes beyond the base discover()/
 # build_command() contract, e.g. bot.py's `/radio channel scan` only offers
@@ -101,9 +102,15 @@ def discover():
 
 
 def build_command(instance: dict, frequency: str, fifo_pipe: str) -> str:
+    # rtl_fm already outputs 48k directly, so the only thing left to do is
+    # duplicate the mono channel into stereo -- `sox ... remix 1 1` does
+    # that in one process instead of spinning up a whole ffmpeg instance
+    # for what amounts to a channel-duplication no-op. See
+    # memory/03-sdr-pipeline-extra-ffmpeg-hop.md.
     return (
         f"rtl_fm -f {frequency} -M wbo -s 170k -r 48k -g 40 | "
-        f"ffmpeg -y -f s16le -ar 48k -ac 1 -i pipe:0 -f s16le -ar 48k -ac 2 pipe:1 >> {fifo_pipe}"
+        "sox -t raw -r 48k -e signed-integer -b 16 -c 1 - "
+        f"-t raw -r 48k -e signed-integer -b 16 -c 2 - remix 1 1 >> {fifo_pipe}"
     )
 
 
